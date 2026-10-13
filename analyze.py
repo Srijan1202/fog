@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from itertools import combinations
 
@@ -72,6 +73,130 @@ def by_mode(runs, field):
     return out
 
 
+STRUCTURAL = ("G1_knee", "G2_sT", "G4_mediator")
+
+
+UNDERVOLT_BITS = 0x1 | 0x10000   # Pi get_throttled: under-voltage now / since boot
+
+
+def _num(x):
+    return (isinstance(x, (int, float)) and not isinstance(x, bool)
+            and math.isfinite(x))
+
+
+def _undervoltage(e1):
+    """True if exp1's recorded throttle flags show under-voltage during heating.
+    Runs without recorded flags (older metadata, non-Pi backends) are not
+    penalized here; there is nothing to check."""
+    th = (e1.get("heat_summary") or {}).get("throttled_or")
+    try:
+        return th is not None and bool(int(th, 16) & UNDERVOLT_BITS)
+    except (TypeError, ValueError):
+        return False
+
+
+def exp2_knee_support(e2):
+    """Experiment 2's knee as SUPPORTING evidence. Never establishes G1."""
+    if e2 and _num(e2.get("knee_c")):
+        return (f"exp2 observed a frequency drop from {e2['knee_c']:.1f} C "
+                "(supporting evidence only; does not establish G1)")
+    return None
+
+
+def classify_g1(e1, e2):
+    """G1 (P4): did a valid Experiment 1 establish a throttle knee?
+
+    Returns (state, knee_c, depth, reason). Explicit rule:
+      NOT_TESTED    no Experiment 1 metadata.
+      PASS          Experiment 1 measured a knee with a complete knee record
+                    (knee_c, f_max, f_min, depth numeric) and no under-voltage
+                    flagged during heating. A knee observed before a safety
+                    stop, or under partial load, still counts: it was observed.
+      FAIL          completed, valid Experiment 1 with no knee: not stopped or
+                    aborted, full load recorded, full heating duration,
+                    frequency recorded, no under-voltage, and not contradicted
+                    by an Experiment 2 knee.
+      INCONCLUSIVE  anything else.
+    Experiment 2 is supporting evidence only: its knee can never PASS G1 and
+    never overrides an inconclusive or missing Experiment 1.
+    """
+    if e1 is None:
+        return ("NOT_TESTED", None, None, "no exp1 data"
+                + ("; an exp2 knee alone does not establish G1"
+                   if exp2_knee_support(e2) else ""))
+    k1 = e1.get("knee")
+    if not isinstance(k1, dict):
+        return ("INCONCLUSIVE", None, None,
+                "exp1 metadata incomplete: no knee measurement recorded")
+    uv = _undervoltage(e1)
+
+    if k1.get("knee_c") is not None:                       # a knee was seen
+        if not all(_num(k1.get(f)) for f in ("knee_c", "f_max", "f_min", "depth")):
+            return ("INCONCLUSIVE", None, None,
+                    "exp1 knee record incomplete (knee_c/f_max/f_min/depth)")
+        if uv:
+            return ("INCONCLUSIVE", None, None, "exp1 frequency drop coincides "
+                    "with under-voltage flags; knee may not be thermal")
+        why = "knee measured in exp1"
+        if e1.get("abort_reason"):
+            why += f" before heating stopped ({e1['abort_reason']}); depth may " \
+                   "be underestimated"
+        return "PASS", k1["knee_c"], k1["depth"], why
+
+    # ---- no knee: FAIL only if exp1 is a complete, valid sustained-load test
+    abort = e1.get("abort_reason") or ""
+    status = e1.get("p4_status")
+    if status == "SAFETY_STOPPED" or abort.startswith("max_temp"):
+        return ("INCONCLUSIVE", None, None,
+                f"SAFETY-STOPPED: INCONCLUSIVE FOR KNEE DETECTION ({abort})")
+    if status == "ABORTED" or abort:
+        return "INCONCLUSIVE", None, None, f"exp1 heating aborted ({abort})"
+    if not _num(k1.get("f_max")):
+        return ("INCONCLUSIVE", None, None,
+                "exp1 recorded no CPU frequency; a knee could not be detected")
+    if not e1.get("mock"):
+        util = e1.get("cpu_util_heating")
+        if not util or not util.get("per_core_busy"):
+            return ("INCONCLUSIVE", None, None, "exp1 recorded no CPU load; "
+                    "sustained max load cannot be confirmed")
+        n = len(util["per_core_busy"])
+        if util["avg_cores_busy"] < n - 0.5:   # same rule as exp1_thermal.py
+            return ("INCONCLUSIVE", None, None, f"exp1 heating loaded only "
+                    f"{util['avg_cores_busy']:.2f} of {n} cores")
+    wall, minutes = e1.get("heat_wall_s"), e1.get("heat_minutes")
+    if _num(wall) and _num(minutes) and wall < 0.95 * minutes * 60:
+        return ("INCONCLUSIVE", None, None, f"exp1 heating lasted {wall:.0f} s "
+                f"of the planned {minutes * 60:.0f} s")
+    if uv:
+        return ("INCONCLUSIVE", None, None,
+                "under-voltage flagged during exp1 heating; run not valid")
+    if exp2_knee_support(e2):
+        return ("INCONCLUSIVE", None, None,
+                f"conflicting evidence: completed exp1 found no knee but exp2 "
+                f"observed a frequency drop from {e2['knee_c']:.1f} C")
+    return ("FAIL", None, None,
+            "completed exp1 at full load observed no throttle knee")
+
+
+def overall_verdict(gates):
+    """Map gate results to a verdict. Returns (verdict, failed_structural)."""
+    hard_fail = [k for k in STRUCTURAL if gates.get(k) is False]
+    if gates.get("G1_knee") is None:
+        return "FURTHER_EVIDENCE", hard_fail
+    if hard_fail:
+        return "KILL", hard_fail
+    if gates.get("G5_outcome") is False and gates.get("G5b_secondary"):
+        return "REFORMULATE", []
+    if gates.get("G5_outcome") is False:
+        return "LIKELY_KILL", []
+    if gates.get("G3_match") is False:
+        return "REFORMULATE_MATCH", []
+    if all(gates.get(k) for k in ("G1_knee", "G2_sT", "G4_mediator",
+                                  "G5_outcome")):
+        return "PROCEED", []
+    return "INCONCLUSIVE", []
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--outdir", default="results")
@@ -86,34 +211,40 @@ def main():
     print("=" * 70)
 
     gates = {}
+    notes = {}
     mock = any(x and x.get("mock") for x in (e1, e2, e3))
     if mock:
         print("\n*** MOCK DATA - SIMULATED. NOT A RESULT. PIPELINE CHECK ONLY. ***")
 
     # ---------------- GATE 1: knee exists (P4) ----------------
     print("\n--- GATE 1 (P4): is there a throttle knee? ---")
-    knee = None
-    depth = None
-    if e1 and e1.get("knee"):
-        knee = e1["knee"].get("knee_c")
-        depth = e1["knee"].get("depth")
-    if knee is None and e2:
-        knee = e2.get("knee_c")
-    if knee is None:
+    g1, knee, depth, why = classify_g1(e1, e2)
+    if g1 == "FAIL":
         print("  FAIL: no throttle knee observed under sustained load.")
         gates["G1_knee"] = False
-    else:
+    elif g1 == "PASS":
         print(f"  knee = {knee:.1f} C" + (f", depth = {depth*100:.1f}%"
                                           if depth else ""))
         gates["G1_knee"] = True
         if depth is not None and depth < 0.05:
             print("  WARNING: throttle depth <5% - effect likely immaterial.")
+    else:
+        print(f"  {g1.replace('_', ' ')}: {why}")
+        print("  A missing or truncated measurement is not a failed hypothesis.")
+        gates["G1_knee"] = None
+        notes["G1_knee"] = f"{g1.replace('_', ' ')}: {why}"
+    support = exp2_knee_support(e2)
+    if support:
+        print(f"  supporting: {support}")
+        notes["G1_support"] = support
+    no_knee = gates["G1_knee"] is None
 
     # ---------------- GATE 2: s(T) not flat (P1) ----------------
     print("\n--- GATE 2 (P1): does service time depend on temperature? ---")
     if not e2:
         print("  no exp2 data")
         gates["G2_sT"] = None
+        notes["G2_sT"] = "NOT TESTED: no exp2 data"
     else:
         sl = e2.get("slope")
         rho = e2.get("spearman_temp_latency")
@@ -121,10 +252,16 @@ def main():
             print(f"  slope {sl['slope_ms_per_C']:+.3f} ms/C "
                   f"[{sl['ci_lo']:+.3f}, {sl['ci_hi']:+.3f}]  rho={rho:+.3f}")
             gates["G2_sT"] = bool(sl["excludes_zero"])
-            print("  PASS" if sl["excludes_zero"] else
-                  "  FAIL: CI includes zero -> s(T) flat -> TDAS DEAD")
+            if sl["excludes_zero"]:
+                print("  PASS")
+            elif no_knee:
+                print("  FAIL: CI includes zero -> s(T) flat over the probed "
+                      "range (knee not established; see verdict)")
+            else:
+                print("  FAIL: CI includes zero -> s(T) flat -> TDAS DEAD")
         else:
             gates["G2_sT"] = None
+            notes["G2_sT"] = "INCONCLUSIVE: exp2 metadata has no slope"
 
     # ---------------- GATE 3: cold-latency match (attack #7) -------
     print("\n--- GATE 3: are HOT and COOL indistinguishable when cold? ---")
@@ -145,7 +282,9 @@ def main():
 
     if not e3:
         print("\nno exp3 data - stopping.")
-        return
+        if no_knee:
+            print(f"G1 {notes['G1_knee']} -> further evidence required.")
+        return {"gates": gates, "notes": notes, "verdict": None}
 
     runs = e3["runs"]
 
@@ -155,6 +294,7 @@ def main():
     if len(tak) < 2:
         print("  cannot test (knee unknown or single ordering)")
         gates["G4_mediator"] = None
+        notes["G4_mediator"] = "NOT TESTED: knee unknown or single ordering"
     else:
         for m, v in sorted(tak.items()):
             print(f"  {m:12s} median {np.median(v):8.1f}s  (n={len(v)})")
@@ -167,7 +307,9 @@ def main():
         gates["G4_mediator"] = bool(d["excludes_zero"])
         if not d["excludes_zero"]:
             print("  FAIL: orderings produce indistinguishable thermal")
-            print("        trajectories. No causal pathway. TDAS DEAD.")
+            print("        trajectories. No causal pathway." +
+                  (" (knee not established; see verdict)" if no_knee
+                   else " TDAS DEAD."))
 
     # ---------------- GATE 5: outcome moves ----------------
     print("\n--- GATE 5: does ORDERING change TAIL LATENCY? (outcome) ---")
@@ -235,36 +377,49 @@ def main():
     print("VERDICT")
     print("=" * 70)
     for k, v in gates.items():
+        if v is None and k in STRUCTURAL:
+            print(f"  NOT TESTED/INCONCLUSIVE  {k}"
+                  + (f"  ({notes[k]})" if k in notes else ""))
+            continue
         sym = {True: "PASS", False: "FAIL", None: "n/a "}[v]
         print(f"  {sym}  {k}")
 
-    hard_fail = [k for k, v in gates.items()
-                 if v is False and k in ("G1_knee", "G2_sT", "G4_mediator")]
-    if hard_fail:
+    verdict, hard_fail = overall_verdict(gates)
+    if verdict == "FURTHER_EVIDENCE":
+        print("\n  >>> FURTHER EVIDENCE REQUIRED - NOT A KILL, NOT A PASS <<<")
+        print(f"  G1 (throttle knee) is not established: {notes['G1_knee']}")
+        if "G1_support" in notes:
+            print(f"  Supporting: {notes['G1_support']}")
+        print("  Without a measured knee, G2 and G4 cannot test TDAS: s(T) is")
+        print("  expected to be flat below the knee, and time-above-knee needs")
+        print("  a knee to exist.")
+        if hard_fail:
+            print(f"  Also FAILED: {', '.join(hard_fail)}. Reported, but not")
+            print("  acted on until G1 is established.")
+    elif verdict == "KILL":
         print("\n  >>> KILL TDAS <<<")
         print(f"  Failed structural gate(s): {', '.join(hard_fail)}")
         print("  The physical precondition does not hold on this hardware.")
         print("  Write it up as a negative result. Do NOT rescue by renaming,")
         print("  adding a neural network, or complicating the scheduler.")
-    elif gates.get("G5_outcome") is False and gates.get("G5b_secondary"):
+    elif verdict == "REFORMULATE":
         print("\n  >>> REFORMULATE <<<")
         print("  Thermal trajectory moves AND a performance metric responds,")
         print("  but not the tail. The physics is real; the P99 framing is")
         print("  wrong. Re-scope the claim to the metric that actually moved")
         print("  (mean latency / throughput) and re-check that the mediation")
         print("  chain holds for THAT metric before writing anything.")
-    elif gates.get("G5_outcome") is False:
+    elif verdict == "LIKELY_KILL":
         print("\n  >>> LIKELY KILL <<<")
         print("  Thermal trajectory moves but no performance metric responds.")
         print("  The effect exists physically but is immaterial to anything")
         print("  the paper would claim to improve.")
-    elif gates.get("G3_match") is False:
+    elif verdict == "REFORMULATE_MATCH":
         print("\n  >>> REFORMULATE <<<")
         print("  Effect present but HOT/COOL cold latencies differ, so a")
         print("  job-length explanation is not excluded. Re-tune and rerun")
         print("  Experiment 3 before claiming anything.")
-    elif all(gates.get(k) for k in ("G1_knee", "G2_sT", "G4_mediator",
-                                    "G5_outcome")):
+    elif verdict == "PROCEED":
         print("\n  >>> PROCEED (conditionally) <<<")
         print("  Full causal chain intact: ordering -> thermal trajectory ->")
         print("  throttle exposure -> tail latency, with job-length")
@@ -277,6 +432,7 @@ def main():
     if mock:
         print("\n  (mock data - this verdict is a pipeline check, not science)")
     print("=" * 70)
+    return {"gates": gates, "notes": notes, "verdict": verdict}
 
 
 if __name__ == "__main__":

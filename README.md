@@ -247,5 +247,4 @@ the scheduler.
 
 The telemetry logger, cooldown controller, workload harness, and statistics
 pipeline all transfer to any subsequent systems project regardless of outcome.
-#   f o g  
- 
+# fog
