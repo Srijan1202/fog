@@ -103,20 +103,49 @@ def exp2_knee_support(e2):
     return None
 
 
+def _exp1_invalid(e1, k1):
+    """Why exp1 is not a completed, valid sustained-load test (None = valid).
+    Applies to PASS and FAIL alike."""
+    abort = e1.get("abort_reason") or ""
+    status = e1.get("p4_status")
+    if status == "SAFETY_STOPPED" or abort.startswith("max_temp"):
+        return f"SAFETY-STOPPED: INCONCLUSIVE FOR KNEE DETECTION ({abort})"
+    if status == "ABORTED" or abort:
+        return f"exp1 heating aborted ({abort})"
+    if not _num(k1.get("f_max")):
+        return "exp1 recorded no CPU frequency; a knee could not be detected"
+    if not e1.get("mock"):
+        util = e1.get("cpu_util_heating")
+        if not util or not util.get("per_core_busy"):
+            return ("exp1 recorded no CPU load; sustained max load cannot be "
+                    "confirmed")
+        n = len(util["per_core_busy"])
+        if util["avg_cores_busy"] < n - 0.5:   # same rule as exp1_thermal.py
+            return (f"exp1 heating loaded only {util['avg_cores_busy']:.2f} "
+                    f"of {n} cores")
+    wall, minutes = e1.get("heat_wall_s"), e1.get("heat_minutes")
+    if _num(wall) and _num(minutes) and wall < 0.95 * minutes * 60:
+        return f"exp1 heating lasted {wall:.0f} s of the planned {minutes * 60:.0f} s"
+    if _undervoltage(e1):
+        return "under-voltage flagged during exp1 heating; run not valid"
+    return None
+
+
 def classify_g1(e1, e2):
-    """G1 (P4): did a valid Experiment 1 establish a throttle knee?
+    """G1 (P4): did a completed, valid Experiment 1 establish a throttle knee?
 
     Returns (state, knee_c, depth, reason). Explicit rule:
       NOT_TESTED    no Experiment 1 metadata.
-      PASS          Experiment 1 measured a knee with a complete knee record
-                    (knee_c, f_max, f_min, depth numeric) and no under-voltage
-                    flagged during heating. A knee observed before a safety
-                    stop, or under partial load, still counts: it was observed.
-      FAIL          completed, valid Experiment 1 with no knee: not stopped or
-                    aborted, full load recorded, full heating duration,
-                    frequency recorded, no under-voltage, and not contradicted
-                    by an Experiment 2 knee.
-      INCONCLUSIVE  anything else.
+      INCONCLUSIVE  Experiment 1 is not a completed, valid sustained-load test
+                    (safety-stopped, aborted, partial or unrecorded load,
+                    short heating, no frequency record, under-voltage,
+                    incomplete metadata), even if it recorded a knee; or a
+                    knee record is incomplete; or a valid no-knee Experiment 1
+                    is contradicted by an Experiment 2 knee.
+      PASS          valid Experiment 1 with a complete knee record
+                    (knee_c, f_max, f_min, depth numeric).
+      FAIL          valid Experiment 1 with no knee, not contradicted by an
+                    Experiment 2 knee.
     Experiment 2 is supporting evidence only: its knee can never PASS G1 and
     never overrides an inconclusive or missing Experiment 1.
     """
@@ -128,48 +157,19 @@ def classify_g1(e1, e2):
     if not isinstance(k1, dict):
         return ("INCONCLUSIVE", None, None,
                 "exp1 metadata incomplete: no knee measurement recorded")
-    uv = _undervoltage(e1)
+    invalid = _exp1_invalid(e1, k1)
+    if invalid:
+        if _num(k1.get("knee_c")):
+            invalid += (f"; a knee recorded at {k1['knee_c']:.1f} C does not "
+                        "establish G1 from an invalid run")
+        return "INCONCLUSIVE", None, None, invalid
 
     if k1.get("knee_c") is not None:                       # a knee was seen
         if not all(_num(k1.get(f)) for f in ("knee_c", "f_max", "f_min", "depth")):
             return ("INCONCLUSIVE", None, None,
                     "exp1 knee record incomplete (knee_c/f_max/f_min/depth)")
-        if uv:
-            return ("INCONCLUSIVE", None, None, "exp1 frequency drop coincides "
-                    "with under-voltage flags; knee may not be thermal")
-        why = "knee measured in exp1"
-        if e1.get("abort_reason"):
-            why += f" before heating stopped ({e1['abort_reason']}); depth may " \
-                   "be underestimated"
-        return "PASS", k1["knee_c"], k1["depth"], why
+        return "PASS", k1["knee_c"], k1["depth"], "knee measured in a valid exp1"
 
-    # ---- no knee: FAIL only if exp1 is a complete, valid sustained-load test
-    abort = e1.get("abort_reason") or ""
-    status = e1.get("p4_status")
-    if status == "SAFETY_STOPPED" or abort.startswith("max_temp"):
-        return ("INCONCLUSIVE", None, None,
-                f"SAFETY-STOPPED: INCONCLUSIVE FOR KNEE DETECTION ({abort})")
-    if status == "ABORTED" or abort:
-        return "INCONCLUSIVE", None, None, f"exp1 heating aborted ({abort})"
-    if not _num(k1.get("f_max")):
-        return ("INCONCLUSIVE", None, None,
-                "exp1 recorded no CPU frequency; a knee could not be detected")
-    if not e1.get("mock"):
-        util = e1.get("cpu_util_heating")
-        if not util or not util.get("per_core_busy"):
-            return ("INCONCLUSIVE", None, None, "exp1 recorded no CPU load; "
-                    "sustained max load cannot be confirmed")
-        n = len(util["per_core_busy"])
-        if util["avg_cores_busy"] < n - 0.5:   # same rule as exp1_thermal.py
-            return ("INCONCLUSIVE", None, None, f"exp1 heating loaded only "
-                    f"{util['avg_cores_busy']:.2f} of {n} cores")
-    wall, minutes = e1.get("heat_wall_s"), e1.get("heat_minutes")
-    if _num(wall) and _num(minutes) and wall < 0.95 * minutes * 60:
-        return ("INCONCLUSIVE", None, None, f"exp1 heating lasted {wall:.0f} s "
-                f"of the planned {minutes * 60:.0f} s")
-    if uv:
-        return ("INCONCLUSIVE", None, None,
-                "under-voltage flagged during exp1 heating; run not valid")
     if exp2_knee_support(e2):
         return ("INCONCLUSIVE", None, None,
                 f"conflicting evidence: completed exp1 found no knee but exp2 "

@@ -30,6 +30,7 @@ import time
 
 import numpy as np
 
+import analyze
 import sensors
 import runner
 import workload as wl
@@ -342,12 +343,13 @@ def p4_verdict(knee, abort_reason, util, is_mock):
             lines.append("  this is neither a pass nor a P4 failure.")
         return status, lines
     n_cores = len(util["per_core_busy"]) if util else None
-    if (not knee_seen and not is_mock and util
+    if (not is_mock and util
             and util["avg_cores_busy"] < n_cores - 0.5):
         return "PARTIAL_LOAD", [
             f"INCONCLUSIVE: heating loaded only {util['avg_cores_busy']:.2f} "
             f"of {n_cores} cores.",
-            "  A missing knee is NOT a P4 verdict for sustained max load.",
+            "  A knee recorded under partial load does not establish P4." if knee_seen
+            else "  A missing knee is NOT a P4 verdict for sustained max load.",
             f"  Rerun with --workers {n_cores} into a separate --outdir."]
     if not knee_seen:
         return "P4_FAIL", [
@@ -360,6 +362,42 @@ def p4_verdict(knee, abort_reason, util, is_mock):
             f"  - P1/P4 WEAK: throttle depth only {knee['depth']*100:.1f}%", "",
             "If P4 failed, TDAS is dead on this hardware. Stop here."]
     return "NO_KILL", ["No kill signal from Experiment 1. Proceed to Experiment 2."]
+
+
+def exp1_outcome(meta):
+    """End-of-run outcome. Returns (outcome, report_lines).
+
+    Decided by the same Experiment 1 validity rule analyze.py applies
+    (analyze.classify_g1), so the run can only recommend proceeding when the
+    analysis would accept its knee. Three outcomes:
+      VALID_KNEE / VALID_KNEE_WEAK  valid run, knee measured
+      VALID_NO_KNEE                 valid completed run, no knee (P4 FAIL)
+      INCONCLUSIVE                  invalid, aborted or safety-stopped run
+    """
+    state, knee, depth, why = analyze.classify_g1(meta, None)
+    if state == "PASS":
+        head = f"VALID RUN, KNEE MEASURED at {knee:.1f} C (depth {depth*100:.1f}%)"
+        if depth < 0.05:
+            return "VALID_KNEE_WEAK", [
+                head, "KILL SIGNALS:",
+                f"  - P1/P4 WEAK: throttle depth only {depth*100:.1f}%", "",
+                "If P4 failed, TDAS is dead on this hardware. Stop here."]
+        return "VALID_KNEE", [
+            head, "No kill signal from Experiment 1. Proceed to Experiment 2."]
+    if state == "FAIL":
+        return "VALID_NO_KNEE", [
+            "VALID COMPLETED RUN, NO KNEE (full load, full duration)",
+            "KILL SIGNALS:",
+            "  - P4 FAIL: no throttle knee reached under sustained load", "",
+            "If P4 failed, TDAS is dead on this hardware. Stop here."]
+    status = meta.get("p4_status")
+    head = (SAFETY_STOP_LABEL if status == "SAFETY_STOPPED" else
+            "ABORTED: INCONCLUSIVE FOR KNEE DETECTION" if status == "ABORTED"
+            else "INCONCLUSIVE: THIS RUN CANNOT DECIDE P4")
+    return "INCONCLUSIVE", [
+        head, f"  Reason: {why}",
+        "  Neither a pass nor a P4 failure. Do not proceed on this run;",
+        "  fix the cause and rerun Experiment 1."]
 
 
 def main():
@@ -502,7 +540,7 @@ def main():
         if len(cool_idx) > 10 else None
     knee = find_knee(T, F)
     util = _cpu_util(cpu_before, cpu_after)
-    status, verdict_lines = p4_verdict(knee, abort_reason, util, is_mock)
+    status, _ = p4_verdict(knee, abort_reason, util, is_mock)
 
     meta = {
         "experiment": "exp1_thermal",
@@ -535,6 +573,8 @@ def main():
         "heat_snapshot_end": snap_end,
         "heat_summary": _heat_summary(tele, t_start, t_heat_done),
     }
+    outcome, outcome_lines = exp1_outcome(meta)
+    meta["exp1_outcome"] = outcome
     runner.save_run(args.outdir, "exp1", meta, [], tele)
 
     # ---------------- report ----------------
@@ -584,7 +624,7 @@ def main():
                   f"{ratio:8.2f}  [{verdict}]")
         print("Pick k for Experiment 3 so tau/horizon lands near 1.")
     print()
-    for line in verdict_lines:
+    for line in outcome_lines:
         print(line)
     print("=" * 62)
     print(f"\nwrote {args.outdir}/exp1.*")

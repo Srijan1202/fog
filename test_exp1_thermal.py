@@ -79,6 +79,93 @@ class SafetyStopIsNeverP4Fail(unittest.TestCase):
         self.assertNotIn("P4 FAIL", _text(lines))
 
 
+PROCEED = "Proceed to Experiment 2"
+
+
+def run_meta(**over):
+    """Metadata of a completed, valid four-core run with a knee; override fields."""
+    m = {"mock": False, "knee": KNEE, "abort_reason": None, "p4_status": "NO_KILL",
+         "cpu_util_heating": FULL_LOAD, "heat_minutes": 15.0, "heat_wall_s": 900.3,
+         "heat_summary": {"throttled_or": "0x0"}}
+    m.update(over)
+    return m
+
+
+class EndOfRunMessageFollowsAnalyzeRule(unittest.TestCase):
+
+    def test_valid_knee_recommends_proceeding(self):
+        outcome, lines = e1.exp1_outcome(run_meta())
+        self.assertEqual(outcome, "VALID_KNEE")
+        self.assertEqual(lines[0], "VALID RUN, KNEE MEASURED at 80.2 C (depth 16.7%)")
+        self.assertIn(PROCEED, _text(lines))
+
+    def test_valid_completed_run_without_knee_reports_p4_fail(self):
+        outcome, lines = e1.exp1_outcome(run_meta(knee=NO_KNEE, p4_status="P4_FAIL"))
+        self.assertEqual(outcome, "VALID_NO_KNEE")
+        self.assertIn("VALID COMPLETED RUN, NO KNEE", lines[0])
+        self.assertIn("P4 FAIL", _text(lines))
+        self.assertNotIn(PROCEED, _text(lines))
+
+    def test_valid_shallow_knee_reports_weak(self):
+        outcome, lines = e1.exp1_outcome(run_meta(knee=SHALLOW_KNEE))
+        self.assertEqual(outcome, "VALID_KNEE_WEAK")
+        self.assertIn("P1/P4 WEAK", _text(lines))
+        self.assertNotIn(PROCEED, _text(lines))
+
+    def test_partial_load_knee_does_not_proceed(self):
+        outcome, lines = e1.exp1_outcome(
+            run_meta(cpu_util_heating=ONE_CORE, p4_status="PARTIAL_LOAD"))
+        self.assertEqual(outcome, "INCONCLUSIVE")
+        self.assertIn("loaded only 1.00 of 4 cores", _text(lines))
+        self.assertIn("Do not proceed", _text(lines))
+        self.assertNotIn(PROCEED, _text(lines))
+
+    def test_safety_stopped_knee_does_not_proceed(self):
+        outcome, lines = e1.exp1_outcome(
+            run_meta(abort_reason=SAFETY, p4_status="SAFETY_STOPPED"))
+        self.assertEqual(outcome, "INCONCLUSIVE")
+        self.assertEqual(lines[0], e1.SAFETY_STOP_LABEL)
+        self.assertNotIn(PROCEED, _text(lines))
+        self.assertNotIn("P4 FAIL", _text(lines))
+
+    def test_aborted_run_does_not_proceed(self):
+        outcome, lines = e1.exp1_outcome(
+            run_meta(abort_reason="worker(s) exited early: ['heat-1']",
+                     p4_status="ABORTED"))
+        self.assertEqual(outcome, "INCONCLUSIVE")
+        self.assertEqual(lines[0], "ABORTED: INCONCLUSIVE FOR KNEE DETECTION")
+        self.assertNotIn(PROCEED, _text(lines))
+
+    def test_other_invalid_runs_with_a_knee_never_proceed(self):
+        for name, over in (("short heating", {"heat_wall_s": 300.0}),
+                           ("under-voltage", {"heat_summary": {"throttled_or": "0x10005"}}),
+                           ("no load record", {"cpu_util_heating": None}),
+                           ("no frequency", {"knee": {**KNEE, "f_max": None}})):
+            with self.subTest(case=name):
+                outcome, lines = e1.exp1_outcome(run_meta(**over))
+                self.assertEqual(outcome, "INCONCLUSIVE")
+                self.assertNotIn(PROCEED, _text(lines))
+
+    def test_message_proceeds_only_when_analyze_would_pass_g1(self):
+        cases = [run_meta(), run_meta(knee=NO_KNEE), run_meta(knee=SHALLOW_KNEE),
+                 run_meta(cpu_util_heating=ONE_CORE),
+                 run_meta(abort_reason=SAFETY, p4_status="SAFETY_STOPPED"),
+                 run_meta(heat_wall_s=118.2), run_meta(cpu_util_heating=None),
+                 run_meta(heat_summary={"throttled_or": "0x1"})]
+        for i, m in enumerate(cases):
+            with self.subTest(case=i):
+                passes = e1.analyze.classify_g1(m, None)[0] == "PASS"
+                _, lines = e1.exp1_outcome(m)
+                self.assertEqual(PROCEED in _text(lines),
+                                 passes and m["knee"]["depth"] >= 0.05)
+
+    def test_p4_status_is_partial_load_even_with_a_knee(self):
+        status, lines = e1.p4_verdict(KNEE, None, ONE_CORE, is_mock=False)
+        self.assertEqual(status, "PARTIAL_LOAD")
+        self.assertIn("knee recorded under partial load", _text(lines))
+        self.assertNotIn(PROCEED, _text(lines))
+
+
 class CoolingNeedsConsecutiveReadings(unittest.TestCase):
     BASE = 48.6
 
@@ -148,12 +235,17 @@ class EndToEndOnMockBackend(unittest.TestCase):
         self.assertIn(e1.SAFETY_STOP_LABEL, stdout)
         self.assertNotIn("P4 FAIL", stdout)
         self.assertNotIn("TDAS is dead", stdout)
+        self.assertNotIn(PROCEED, stdout)
+        self.assertIn("Do not proceed on this run", stdout)
+        self.assertEqual(meta["exp1_outcome"], "INCONCLUSIVE")
 
     def test_control_unstopped_run_without_knee_still_reports_p4_fail(self):
         stdout, meta = self.run_main("--minutes", "0.05", "--cool-minutes", "0.05")
         self.assertIsNone(meta["abort_reason"])
         self.assertEqual(meta["p4_status"], "P4_FAIL")
         self.assertIn("P4 FAIL", stdout)
+        self.assertIn("VALID COMPLETED RUN, NO KNEE", stdout)
+        self.assertEqual(meta["exp1_outcome"], "VALID_NO_KNEE")
 
     def test_cooling_ends_only_after_n_consecutive_readings(self):
         # Limit 25.8 C is within 1 C of the 25 C baseline, so EVERY cooling

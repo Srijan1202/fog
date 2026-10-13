@@ -19,6 +19,7 @@ probe.py
        ▼
 exp1_thermal.py    → tau_heat, tau_cool, knee, throttle depth
   └─ no knee reached under sustained load ──────────────────► KILL (P4)
+     (only a completed, valid full-load run - see Amendment A1)
   └─ tau/horizon far from 1 for all feasible k ─────────────► KILL (P3)
        │
        ▼
@@ -27,6 +28,7 @@ exp2_curve.py      → s(T)
        │
        ▼
 exp3_ordering.py   → identical-multiset orderings
+  └─ no valid Exp 1 knee (G1 not PASS) ─────────────────────► refuses to run (A1)
   └─ time-above-knee identical across orderings ────────────► KILL (no pathway)
   └─ mediator moves, no metric responds ────────────────────► LIKELY KILL
   └─ mediator moves, mean/throughput responds, P99 doesn't ─► REFORMULATE
@@ -66,7 +68,10 @@ power supply throughout. Log room temperature at the start of every session.
 python3 probe.py                                    # Experiment 0   (5 min)
 python3 exp1_thermal.py --minutes 15 --outdir results     # Exp 1  (~30 min)
 python3 exp2_curve.py --stages 8 --outdir results         # Exp 2  (~2 h)
-python3 exp3_ordering.py --reps 10 --k 60 --outdir results  # Exp 3 (~4-6 h)
+# workload validation (A2; separate approval) - launch with the watchdog, see below
+python3 exp3_ordering.py --reps 10 --k 60 --parallel 4 \
+    --workload-validation results/workload_validation/<run>/report.json \
+    --exp1-meta results/exp1.meta.json --outdir results           # Exp 3 (~4-6 h)
 python3 analyze.py --outdir results                 # verdict
 ```
 
@@ -76,6 +81,40 @@ Pipeline check without hardware (**simulated — never report as a result**):
 python3 probe.py --backend mock
 python3 exp1_thermal.py --backend mock --minutes 2 --cool-minutes 2 --outdir results_mock
 ```
+
+### Launching the workload validation
+
+Only with explicit approval. **Start only after the Pi has been idle for at least
+15 minutes**: the validator measures its idle baseline in the first 30 s, and
+every block must start within 2 °C of it, so a warm start raises every block's
+start threshold. Check the governor (`performance` on all cores) first.
+
+```bash
+cd ~/tdas-pilot
+OUT=results/workload_validation; RUN=$(date +%Y%m%d-%H%M%S); mkdir -p "$OUT"
+setsid nohup python3 -u validate_workload.py --outdir "$OUT" --run-id "$RUN" \
+    > "$OUT/$RUN.stdout.log" 2>&1 < /dev/null &
+VPID=$!
+for i in $(seq 1 40); do [ -d "$OUT/$RUN" ] && break; sleep 0.25; done
+setsid nohup bash tools/validation_monitor.sh "$VPID" "$OUT/$RUN" \
+    > /dev/null 2>&1 < /dev/null &
+```
+
+- The watchdog (`tools/validation_monitor.sh`) starts during the validator's
+  30 s idle window, before any load. It refuses to start unless `$VPID` is
+  `validate_workload.py` for that run id. Every 5 s it stops the validator at
+  **67 °C**, on a rise of more than 15 °C in 5 s, on under-voltage, after 3
+  failed reads, or after 2 h. It logs to `$OUT/$RUN/monitor.log`.
+- **Stopping:** the watchdog, or an operator with `kill -TERM $VPID`, sends
+  SIGTERM. The validator stops its worker pools and writes `report.json` with
+  `interrupted` set and `overall: INCOMPLETE`. If it is still alive after 30 s,
+  the watchdog sends SIGKILL. Worker processes exit by themselves within about
+  0.5 s of their parent dying, and the watchdog terminates any that remain.
+- **SSH disconnection** affects neither process: both run under
+  `setsid nohup` with no terminal.
+- **Results:** `$OUT/$RUN/report.json`. Experiment 3 accepts only a report with
+  `overall: COMPLETE`, no interruption, and an ACCEPTED configuration for its
+  `--parallel`, made with the current `workload.py`.
 
 **Choosing `k` for Experiment 3.** Experiment 1 prints a `tau/horizon` table.
 Pick `k` so `tau/horizon` lands near 1. This is the corrected P3 criterion —
@@ -109,14 +148,28 @@ run. Records per-job latency and 5 Hz telemetry, computes time-above-knee.
 
 ## The workload design (why attack #7 is defused)
 
-HOT and COOL both run to the same wall-clock deadline, so they have
-**identical cold latency**; COOL simply duty-cycles (default 0.35) and
-therefore draws less average power. Two job classes indistinguishable in
-service time on a cold device cannot produce an ordering effect through
-SJF / queueing / convoy mechanisms. The only remaining channel is thermal.
+> **Superseded for Experiment 3 by Amendment A2 (below).** The original
+> design, kept here for the record: HOT and COOL both ran to the same
+> wall-clock deadline, so they had identical cold latency by construction, and
+> COOL duty-cycled at 0.35. On the Pi this was defective. One 512×512 multiply
+> takes about 237 ms, longer than the 200 ms deadline, so both classes did
+> exactly one multiply at 100% CPU and there was no contrast. A deadline job's
+> latency also cannot show throttling, because a slower CPU just does less work
+> in the same time. The deadline `Workload` class remains only as the
+> Experiment 1/2 heat generator.
 
-`exp3` verifies this empirically before running and warns if the gap
-exceeds 5%. If it does, re-tune `--target-ms` / `--cool-duty`.
+**Fixed-work design (A2).** Latency is the time to finish a fixed number of
+compute units, using the same kernel for both classes. HOT runs `u_h` units
+back to back. COOL runs `u_c ≈ 0.35·u_h` units plus a calibrated sleep, so its
+cold latency matches HOT's while its CPU demand is about a third. P = 1 and
+P = 4 (shards on 4 pinned worker processes; each job uses all of them) are
+calibrated separately. `validate_workload.py` measures the units, overhead,
+CPU time, realised duty and cold-latency gap against pre-registered criteria
+(`PREREG_workload_validation.md`). Experiment 3 runs on real hardware only with
+an **ACCEPTED** validation for its `--parallel`. Matched cold latency means
+service times are indistinguishable when cold, within the measured gap, so
+SJF, queueing and convoy effects cannot explain an ordering effect. That leaves
+the thermal channel.
 
 ---
 
@@ -161,7 +214,7 @@ Committed **before** looking at Experiment 3 results.
 
 | Gate | Tests | KILL if |
 |---|---|---|
-| G1 | throttle knee exists (P4) | no frequency drop under sustained load |
+| G1 | throttle knee exists (P4) | no frequency drop under sustained load (valid Exp 1 only; see A1) |
 | G2 | s(T) not flat (P1) | slope CI includes zero |
 | G3 | HOT/COOL cold-latency match | gap > 5% (attack #7 live) → reformulate |
 | G4 | ordering moves the mediator | time-above-knee CI includes zero |
@@ -176,6 +229,57 @@ time-above-knee also moved**. Ordering → thermal trajectory → throttle
 exposure → service time → tail latency. Flat middle links mean the latency
 difference is noise or confounding.
 
+### Amendment A1 (2026-10-14, before any Experiment 3 data)
+
+What G1 needs, and where Exp 3's threshold comes from.
+
+- **G1 is decided only by a completed, valid Exp 1.** "Valid" means: not
+  safety-stopped or aborted; full load on every core recorded; full heating
+  duration; CPU frequency recorded; no under-voltage flagged; and a complete
+  knee record. A knee recorded in an invalid run does not count.
+- **PASS:** a valid Exp 1 measured a knee. **FAIL:** a valid Exp 1 found no
+  knee. **INCONCLUSIVE:** Exp 1 is invalid or incomplete. **NOT TESTED:** no
+  Exp 1 data. A missing or truncated measurement is never a failed hypothesis.
+- **If G1 is not PASS or FAIL,** the verdict is `FURTHER EVIDENCE REQUIRED —
+  NOT A KILL, NOT A PASS`. G2 and G4 results are still reported, but they do
+  not trigger a kill, because without a knee neither can test TDAS.
+- **An Exp 2 knee is supporting evidence only.** It never establishes G1. If
+  a valid Exp 1 found no knee but Exp 2 did, G1 is INCONCLUSIVE.
+- **Exp 3's time-above-knee threshold** comes only from a G1-PASS Exp 1
+  (`--exp1-meta`, default `<outdir>/exp1.meta.json`). Exp 3 never substitutes
+  Exp 2's knee, and on real hardware it refuses to run without a valid knee.
+  `--knee` works only with the mock backend.
+
+Why: the first Exp 1 runs on the bare Pi 4 were a one-core run (the BLAS
+library was single-threaded) and a four-core run that hit the 75 °C safety
+stop. Neither observed a knee. Under the original wording, both would have
+counted as a G1 FAIL and killed TDAS on missing evidence.
+
+### Amendment A2 (2026-10-14, before any Experiment 3 data)
+
+Fixed-work jobs and controlled planned work.
+
+- **Fixed work, not deadlines.** Each job runs a fixed number of compute units
+  (one `n_b × n_b` float32 multiply each). Its latency is the time to finish
+  them. HOT and COOL use the same kernel. COOL does fewer units plus a
+  calibrated sleep. Duty, CPU time and coordination overhead are measured,
+  never taken from settings, and no ideal speedup from P = 4 is assumed.
+- **Identical job multiset.** Every ordering runs the same jobs: the same number
+  of each class, the same planned units per job and the same planned sleep per
+  job. Only the order differs. Each run records its achieved units, CPU-seconds
+  and sleep.
+- **Energy is not measured.** There is no power meter, and the Pi 4 exposes no
+  energy counter. Equal planned work does not imply equal energy, because
+  energy per unit depends on frequency, voltage and temperature. No equal-energy
+  claim is made unless a suitable meter is added and used.
+- **Workload validation comes first.** `validate_workload.py` (V0, V1 = P1,
+  V2 = P4, V4) checks the contrast and the cold-latency match against
+  pre-registered criteria (`PREREG_workload_validation.md`), with exactly 40
+  accepted HOT/COOL pairs per configuration and a paired bootstrap. Experiment 3
+  refuses to run on real hardware unless the validation for its `--parallel` is
+  ACCEPTED and was made with the current `workload.py`. It also still requires
+  a valid Experiment 1 knee (A1). V3 (frequency caps) is excluded.
+
 ---
 
 ## Expected confounders
@@ -187,7 +291,7 @@ difference is noise or confounding.
 | Fixed-duration rests drifting with ambient | `cool_to()` targets a temperature, never a time |
 | Cache/allocator warm-up | first ~20 jobs excluded |
 | Background processes | quiet the machine; pin with `taskset` |
-| Job-length (SJF/convoy) explanation | matched cold latency by construction, verified |
+| Job-length (SJF/convoy) explanation | cold latency matched by an ACCEPTED workload validation (paired-bootstrap gap within ±5%, A2) |
 | Sampling only between jobs | 5 Hz background thread samples independently |
 | Mock data mistaken for results | every output labels `mock: true` |
 

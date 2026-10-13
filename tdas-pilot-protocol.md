@@ -30,6 +30,8 @@ All four must hold simultaneously. Any one failing kills TDAS.
 
 **P3 and P4 are what the earlier audits got wrong or missed.** The old gate ("τ ≳ 5× median service time") passes in exactly the regime where ordering does nothing, because with τ ≫ horizon the temperature is quasi-static across your decision window and a fixed multiset has fixed total energy. Design the pilot around P3 and P4.
 
+> **Amendment A2:** "a fixed multiset has fixed total energy" should read: a fixed multiset has fixed **planned** work. Its total energy is approximately fixed and is not measured. The P3 argument is unaffected.
+
 ### Observables required
 
 | Variable | Source (Raspberry Pi — **verify on your device**) | Essential? |
@@ -84,6 +86,8 @@ All four must hold simultaneously. Any one failing kills TDAS.
 
 Sequences with **identical multisets** — same requests, same total work, same total energy — differing only in order:
 
+> **Amendment A2 (2026-10-14, before any Experiment 3 data):** read "identical multiset" as **the same jobs: the same number of each class, the same planned compute units per job and the same planned sleep per job**, differing only in order. Jobs are fixed-work (latency = the time to finish a fixed number of units), not deadline-based. Each run records its achieved units, CPU-seconds and sleep. **Energy is not measured**: there is no power meter, and the Pi 4 exposes no energy counter. Equal planned work does not imply equal energy, because energy per unit depends on frequency, voltage and temperature. No equal-energy claim is made unless a suitable meter is added and used. Day 2 runs only after an ACCEPTED workload validation (`validate_workload.py`, `PREREG_workload_validation.md`).
+
 ```
 Sequence A (clustered):   H H H H H C C C C C
 Sequence B (interleaved): H C H C H C H C H C
@@ -97,6 +101,8 @@ Run each ≥10 times, interleaved and counterbalanced, full cooldown between run
 **Record per run:** full T trajectory; full f trajectory; **time spent above T_knee** (key mediating variable); per-request latency → P50/P95/P99; total throughput; throttle-flag timeline.
 
 > Because A and B have identical total energy, their *final* temperatures will be nearly identical. Any effect must appear in the **trajectory** — specifically time-above-knee. If time-above-knee is identical across orderings, ordering has no mechanism to act through and TDAS dies.
+
+> **Amendment A2:** A and B have identical **planned work**. Their total energy is only approximately equal and is not measured, so "nearly identical final temperatures" is an expectation, not a guarantee. The trajectory argument is unchanged.
 
 ### Day 3 — Baselines and statistics
 
@@ -186,6 +192,8 @@ Attacks **2, 7, 8, 9** are the real threats. All four are settled by this pilot.
 - Effect persists under the equal-compute control
 - TDAS beats both B4 (alternation) and tuned B5 (threshold) in at least one mechanistically explicable regime
 - Effect appears on real inference models, not only synthetic stress loads
+
+**Amendment A1 (2026-10-14, before any Experiment 3 data):** "Throttling cannot be induced" (P4) is judged only from a completed, valid Day-1 run: full load on every core, full duration, not safety-stopped or aborted, no under-voltage. A missing, truncated or under-loaded run is inconclusive, never a kill. The Day-1d (s(T)) knee is supporting evidence only. Day 2 takes its time-above-knee threshold only from a valid Day-1 knee and does not run without one. Details are in README.md, Amendment A1.
 
 **On thresholds:** deliberately no "≥20% improvement" bar. Report effect sizes with CIs and let magnitude speak. A well-characterized 8% tail improvement with a clean mechanism is a better paper than a hand-waved 30%.
 

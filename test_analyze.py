@@ -42,6 +42,7 @@ E1_VALID_FAIL = {**E1_4CORE, "abort_reason": None, "p4_status": "P4_FAIL"}
 E1_KNEE = {**E1_4CORE, "abort_reason": None, "knee": KNEE,
            "p4_status": "NO_KILL"}
 E1_KNEE_THEN_STOPPED = {**E1_4CORE, "knee": KNEE, "p4_status": "SAFETY_STOPPED"}
+E1_KNEE_PARTIAL = {**E1_PARTIAL, "knee": KNEE, "p4_status": "NO_KILL"}
 E1_MOCK_FAIL = {"experiment": "exp1_thermal", "backend": "mock", "mock": True,
                 "knee": NO_KNEE, "abort_reason": None, "p4_status": "P4_FAIL",
                 "cpu_util_heating": {"per_core_busy": [0.0] * 4,
@@ -141,9 +142,33 @@ class G1Classification(unittest.TestCase):
         self.assertEqual(an.classify_g1({**E1_KNEE, **thermal_only}, None)[0],
                          "PASS")
 
-    def test_measured_knee_passes_even_if_heating_later_stopped(self):
-        self.assertEqual(an.classify_g1(E1_KNEE, None)[0], "PASS")
-        self.assertEqual(an.classify_g1(E1_KNEE_THEN_STOPPED, None)[0], "PASS")
+    def test_knee_recorded_before_safety_stop_is_inconclusive(self):
+        state, knee, _, why = an.classify_g1(E1_KNEE_THEN_STOPPED, None)
+        self.assertEqual((state, knee), ("INCONCLUSIVE", None))
+        self.assertIn("SAFETY-STOPPED", why)
+        self.assertIn("knee recorded at 80.2 C does not establish G1", why)
+
+    def test_knee_recorded_under_partial_load_is_inconclusive(self):
+        state, knee, _, why = an.classify_g1(E1_KNEE_PARTIAL, None)
+        self.assertEqual((state, knee), ("INCONCLUSIVE", None))
+        self.assertIn("loaded only", why)
+
+    def test_knee_in_any_invalid_exp1_never_passes(self):
+        for name, e1 in (
+                ("safety", E1_KNEE_THEN_STOPPED), ("partial", E1_KNEE_PARTIAL),
+                ("aborted", {**E1_ABORTED, "knee": KNEE}),
+                ("legacy", {**E1_1CORE_LEGACY, "knee": KNEE}),
+                ("short", {**E1_KNEE, "heat_minutes": 15.0, "heat_wall_s": 300.0}),
+                ("undervolt", {**E1_KNEE,
+                               "heat_summary": {"throttled_or": "0x10004"}})):
+            for e2 in (None, E2_PASS, {**E2_PASS, "knee_c": 79.0}):
+                with self.subTest(e1=name, e2=e2 and e2.get("knee_c")):
+                    self.assertEqual(an.classify_g1(e1, e2)[0], "INCONCLUSIVE")
+
+    def test_control_valid_exp1_knee_passes(self):
+        self.assertEqual(an.classify_g1(E1_KNEE, None)[:2], ("PASS", 80.2))
+        full = {**E1_KNEE, "heat_minutes": 15.0, "heat_wall_s": 900.4}
+        self.assertEqual(an.classify_g1(full, None)[0], "PASS")
 
     def test_control_completed_full_load_run_without_knee_is_fail(self):
         self.assertEqual(an.classify_g1(E1_VALID_FAIL, None)[0], "FAIL")

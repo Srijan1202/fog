@@ -2,16 +2,24 @@
 """
 EXPERIMENT 3 - identical-multiset ordering test. THE decisive experiment.
 
-Every ordering executes exactly the same multiset of jobs, so total work and
-total energy are identical BY CONSTRUCTION. HOT and COOL are calibrated to
-the same cold latency, so job-length/queueing explanations are ruled out too.
-The only remaining channel from ordering to tail latency is thermal.
+Every ordering executes the same multiset of FIXED-WORK jobs (Amendment A2):
+the same jobs, the same planned compute units and the same planned sleep per
+job. Achieved totals are recorded per run. Energy is NOT measured; equal
+planned work does not imply equal energy. HOT and COOL cold latencies are
+matched by an ACCEPTED workload validation (validate_workload.py), so
+job-length/queueing explanations are excluded within its measured tolerance.
+
+On real hardware this script refuses to run unless BOTH hold:
+  - a valid Experiment 1 knee (G1 PASS)            --exp1-meta
+  - an ACCEPTED workload validation for --parallel --workload-validation
 
 Runs are INTERLEAVED and COUNTERBALANCED (not blocked by condition), because
 ambient drifts over a multi-hour session and a blocked design confounds
 condition with time-of-day.
 
-    python3 exp3_ordering.py --reps 10 --k 60 --outdir results
+    python3 exp3_ordering.py --reps 10 --k 60 --parallel 4 \
+        --workload-validation results/workload_validation/<run>/report.json \
+        --exp1-meta results/<exp1>/exp1.meta.json --outdir results
     python3 exp3_ordering.py --backend mock --reps 6 --k 40 --outdir results_mock
 
 Outputs: results/exp3.{meta.json,jobs.jsonl,telemetry.jsonl}
@@ -20,18 +28,120 @@ Outputs: results/exp3.{meta.json,jobs.jsonl,telemetry.jsonl}
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import time
 
 import numpy as np
 
+import analyze
 import sensors
 import runner
 import workload as wl
 
 
-def run_one_sequence(b, seq, knee_c, hz, is_mock, hot_power, cool_power):
+def _load_json(path):
+    if path and os.path.exists(path):
+        with open(path) as f:
+            return json.load(f)
+    return None
+
+
+def resolve_threshold(exp1_meta, exp2_meta, is_mock, knee_override=None):
+    """Time-above-knee threshold for this run.
+
+    Only a knee from an Experiment 1 that passes G1 (analyze.classify_g1, the
+    same rule the analysis uses) may set the threshold of a confirmatory run.
+    Experiment 2's knee is recorded as supporting evidence and is never
+    substituted. --knee is accepted only on the mock backend.
+    """
+    e1 = _load_json(exp1_meta)
+    state, knee, _, why = analyze.classify_g1(e1, None)
+    th = {"exp1_meta": exp1_meta, "g1_state": state, "g1_reason": why,
+          "exp2_knee_support": analyze.exp2_knee_support(_load_json(exp2_meta))}
+    if knee_override is not None:
+        if not is_mock:
+            raise SystemExit("--knee is only allowed with the mock backend; a "
+                             "confirmatory run takes its knee from a valid "
+                             "Experiment 1 (--exp1-meta)")
+        th.update(knee_c=knee_override, knee_source="mock --knee",
+                  confirmatory=False)
+    elif state == "PASS":
+        th.update(knee_c=knee, knee_source="exp1 (G1 PASS)",
+                  confirmatory=not is_mock)
+    else:
+        th.update(knee_c=None, knee_source=None, confirmatory=False)
+    return th
+
+
+def _sha256(path):
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
+def resolve_workload(report_path, P, is_mock):
+    """Fixed-work HOT/COOL specs for this run. Returns (info, refusal).
+
+    Real hardware: only parameters frozen by a workload validation whose
+    configuration P is ACCEPTED may be used, and only with the same
+    workload.py that validation measured. Anything else is a refusal.
+    Mock: simulated jobs, never confirmatory, no validation needed.
+    """
+    import validate_workload as vw
+    if is_mock:
+        hot, cool = wl.JobSpec("HOT", P or 1, 0, 0), wl.JobSpec("COOL", P or 1, 0, 0)
+        return ({"accepted": False, "mock": True, "hot": hot, "cool": cool,
+                 "cold_latency_match": {"matched": True, "note": "mock"}}, None)
+    if P is None:
+        return None, "--parallel is required on real hardware (1 or 4)"
+    rep = _load_json(report_path)
+    if rep is None:
+        return None, f"no workload validation report at {report_path!r}"
+    if rep.get("overall") != "COMPLETE":
+        return None, (f"workload validation is {rep.get('overall', 'missing')}, "
+                      "not COMPLETE" + (f" ({rep['reason']})" if rep.get("reason") else ""))
+    if rep.get("interrupted"):
+        return None, f"workload validation was interrupted ({rep['interrupted']})"
+    cfg = (rep.get("configs") or {}).get(str(P)) or {}
+    if cfg.get("status") != vw.ACCEPTED:
+        return None, (f"workload validation for P={P} is "
+                      f"{cfg.get('status', 'missing')}, not {vw.ACCEPTED}"
+                      + (f" ({cfg['reason']})" if cfg.get("reason") else ""))
+    ev, frozen = cfg.get("evaluation") or {}, cfg.get("frozen") or {}
+    gap = ev.get("gap") or {}
+    if gap.get("n_pairs") != vw.PREREG["accepted_pairs"]:
+        return None, f"validation used {gap.get('n_pairs')} pairs, not {vw.PREREG['accepted_pairs']}"
+    if gap.get("class") not in (vw.TARGET, vw.WITHIN):
+        return None, f"cold-latency gap class is {gap.get('class')}"
+    if not all(ev.get("criteria", {}).values()) or not ev.get("criteria"):
+        return None, "not every acceptance criterion holds"
+    if frozen.get("stale") or not all(k in frozen for k in ("P", "n_b", "u_h", "u_c", "S_ms")):
+        return None, "frozen parameters are stale or incomplete"
+    if frozen["P"] != P:
+        return None, f"frozen parameters are for P={frozen['P']}, not P={P}"
+    recorded = (rep.get("prereg_sha256") or {}).get("workload.py")
+    if recorded != _sha256(wl.__file__):
+        return None, ("workload.py differs from the version the validation "
+                      "measured; revalidate before running")
+    hot, cool = wl.make_job_specs(frozen)
+    vals = ev.get("values", {})
+    return ({"accepted": True, "mock": False, "hot": hot, "cool": cool,
+             "frozen": frozen, "validation_run": rep.get("run_id"),
+             "report": report_path,
+             "cold_latency_match": {
+                 "hot_median_ms": vals.get("hot_median_ms"),
+                 "cool_median_ms": vals.get("cool_median_ms"),
+                 "relative_gap": gap.get("g_hat"),
+                 "gap_ci": [gap.get("ci_lo"), gap.get("ci_hi")],
+                 "gap_class": gap.get("class"),
+                 "matched": True,
+                 "source": f"workload validation {rep.get('run_id')} (P={P})"}},
+            None)
+
+
+def run_one_sequence(b, seq, knee_c, hz, is_mock, hot_power, cool_power,
+                     pool=None):
     """Execute one ordering; return (jobs, telemetry, summary)."""
     log = runner.TelemetryLogger(b, hz=hz)
     log.start()
@@ -39,6 +149,7 @@ def run_one_sequence(b, seq, knee_c, hz, is_mock, hot_power, cool_power):
     jobs = []
     for idx, job in enumerate(seq):
         before = b.read()
+        work = {}
         if is_mock:
             b.set_power(hot_power if job.name == "HOT" else cool_power)
             r = b.read()
@@ -47,7 +158,12 @@ def run_one_sequence(b, seq, knee_c, hz, is_mock, hot_power, cool_power):
             lat += np.random.normal(0, 2.0)
             time.sleep(0.02)
         else:
-            lat = job.run_once()
+            rec = pool.run_job(job)
+            lat = rec["latency_ms"]
+            work = {k: rec[k] for k in (
+                "units_planned", "units_done", "cpu_ms", "compute_ms",
+                "sleep_req_ms", "sleep_actual_ms", "realized_duty",
+                "overhead_ms", "imbalance", "skew_ms")}
         after = b.read()
         jobs.append({
             "idx": idx,
@@ -58,6 +174,7 @@ def run_one_sequence(b, seq, knee_c, hz, is_mock, hot_power, cool_power):
             "temp_after_c": after.get("temp_c"),
             "freq_mhz": after.get("freq_mhz"),
             "throttled": after.get("throttled"),
+            **work,
         })
     wall = time.monotonic() - t0
     tele = log.stop()
@@ -91,6 +208,11 @@ def run_one_sequence(b, seq, knee_c, hz, is_mock, hot_power, cool_power):
         "mean_temp_c": float(np.mean(temps)) if temps else None,
         "time_above_knee_s": time_above,
         "time_throttled_s": time_throttled,
+        "planned": wl.planned_totals(seq),
+        "achieved": None if is_mock else {
+            "units_done": sum(j["units_done"] for j in jobs),
+            "cpu_ms": sum(j["cpu_ms"] for j in jobs),
+            "sleep_actual_ms": sum(j["sleep_actual_ms"] for j in jobs)},
     }
     return jobs, tele, summary
 
@@ -104,13 +226,19 @@ def main():
                     help="jobs per sequence (the reordering horizon)")
     ap.add_argument("--hot-frac", type=float, default=0.5)
     ap.add_argument("--knee", type=float, default=None,
-                    help="throttle knee in C (from Experiment 1/2)")
+                    help="mock backend only: time-above-knee threshold in C. "
+                         "Real runs take it from a valid Experiment 1")
+    ap.add_argument("--exp1-meta", default=None,
+                    help="Experiment 1 metadata whose knee sets the threshold "
+                         "(default: <outdir>/exp1.meta.json)")
     ap.add_argument("--cool-target", type=float, default=None,
                     help="cool down to this temp between runs")
     ap.add_argument("--orderings", default="hot_first,cool_first,alternating,random")
-    ap.add_argument("--n", type=int, default=512)
-    ap.add_argument("--target-ms", type=float, default=200.0)
-    ap.add_argument("--cool-duty", type=float, default=0.35)
+    ap.add_argument("--parallel", type=int, choices=(1, 4), default=None,
+                    help="fixed-work workers per job; must be an ACCEPTED "
+                         "validated configuration (required on real hardware)")
+    ap.add_argument("--workload-validation", default=None,
+                    help="report.json from validate_workload.py")
     ap.add_argument("--hz", type=float, default=5.0)
     ap.add_argument("--outdir", default="results")
     ap.add_argument("--seed", type=int, default=0)
@@ -128,42 +256,43 @@ def main():
 
     print(f"[exp3] backend={b.name} orderings={modes} reps={args.reps} k={args.k}")
 
-    # ---- knee ----
-    knee_c = args.knee
-    if knee_c is None:
-        p = os.path.join(args.outdir, "exp1.meta.json")
-        if os.path.exists(p):
-            with open(p) as f:
-                m = json.load(f)
-            knee_c = (m.get("knee") or {}).get("knee_c")
-        if knee_c is None:
-            p = os.path.join(args.outdir, "exp2.meta.json")
-            if os.path.exists(p):
-                with open(p) as f:
-                    knee_c = json.load(f).get("knee_c")
-    if knee_c is None:
-        print("[exp3] WARNING: no knee known. time_above_knee will be null and")
-        print("       the mediation test cannot run. Supply --knee.")
+    # ---- knee: only from a valid Experiment 1 (checked before any load) ----
+    th = resolve_threshold(
+        args.exp1_meta or os.path.join(args.outdir, "exp1.meta.json"),
+        os.path.join(args.outdir, "exp2.meta.json"), is_mock, args.knee)
+    knee_c = th["knee_c"]
+    print(f"[exp3] G1 {th['g1_state']}: {th['g1_reason']}")
+    if th["exp2_knee_support"]:
+        print(f"[exp3] {th['exp2_knee_support']}; not used as the threshold")
+    if knee_c is not None:
+        print(f"[exp3] knee = {knee_c:.1f} C ({th['knee_source']})")
+    elif not is_mock:
+        print("[exp3] REFUSING TO RUN: no valid Experiment 1 knee.")
+        print("       time_above_knee (the G4 mediator) would be unavailable, so")
+        print("       this run could not test TDAS. Experiment 2's knee is")
+        print("       supporting evidence only and is not substituted.")
+        return 2
     else:
-        print(f"[exp3] knee = {knee_c:.1f} C")
+        print("[exp3] mock run without a knee: time_above_knee unavailable "
+              "(pipeline check only)")
 
-    # ---- workloads with matched cold latency ----
-    hot, cool = wl.calibrate(n_hot=args.n, target_ms=args.target_ms,
-                             cool_duty=args.cool_duty)
-    if not is_mock:
-        print("[exp3] verifying HOT/COOL cold-latency match ...")
-        vm = wl.verify_match(hot, cool, reps=12)
-        print(f"  hot={vm['hot_median_ms']:.1f}ms cool={vm['cool_median_ms']:.1f}ms "
-              f"gap={vm['relative_gap']*100:.1f}% matched={vm['matched']}")
-        if not vm["matched"]:
-            print("  ACTION: cold latencies differ >5%. Re-tune --target-ms /")
-            print("          --cool-duty before trusting Experiment 3, or")
-            print("          reviewer attack #7 is live.")
-    else:
-        vm = {"matched": True, "note": "mock"}
+    # ---- fixed-work jobs: only from an ACCEPTED workload validation ----
+    wk, refusal = resolve_workload(args.workload_validation, args.parallel, is_mock)
+    if refusal:
+        print(f"[exp3] REFUSING TO RUN: {refusal}")
+        print("       Run validate_workload.py (with approval) and pass its")
+        print("       report.json via --workload-validation.")
+        return 2
+    hot, cool = wk["hot"], wk["cool"]
+    vm = wk["cold_latency_match"]
+    if wk["accepted"]:
+        print(f"[exp3] workload: {vm['source']}  u_h={hot.units_per_shard} "
+              f"u_c={cool.units_per_shard} S={cool.sleep_per_shard_ms:.2f} ms "
+              f"gap {vm['relative_gap']:+.4f} ({vm['gap_class']})")
 
     n_hot = int(round(args.k * args.hot_frac))
     multiset = wl.make_multiset(n_hot, args.k - n_hot, hot, cool)
+    planned = wl.planned_totals(multiset)
 
     idle = b.read().get("temp_c")
     cool_target = args.cool_target if args.cool_target is not None else \
@@ -182,37 +311,51 @@ def main():
 
     all_jobs, all_tele, results = [], [], []
     t_session = time.monotonic()
-    for i, (rep, mode) in enumerate(schedule):
-        if cool_target is not None:
-            cd = runner.cool_to(b, cool_target, verbose=False)
-            if not cd["ok"]:
-                print(f"  [warn] cooldown incomplete before run {i} "
-                      f"({cd.get('reason')}, at {cd.get('final_temp_c')}C)")
-        seq = wl.order_sequence(multiset, mode, rng)
-        jobs, tele, summ = run_one_sequence(
-            b, seq, knee_c, args.hz, is_mock,
-            hot_power=1.45, cool_power=0.55)
-        summ.update({"rep": rep, "mode": mode, "run_index": i,
-                     "start_temp_c": cd.get("final_temp_c") if cool_target else None,
-                     "session_t": time.monotonic() - t_session})
-        results.append(summ)
-        for j in jobs:
-            j.update({"rep": rep, "mode": mode, "run_index": i})
-        all_jobs.extend(jobs)
-        for s in tele:
-            s.update({"run_index": i, "mode": mode})
-        all_tele.extend(tele)
-        print(f"  run {i+1}/{len(schedule)} rep={rep} {mode:12s} "
-              f"p99={summ['p99_ms']:7.1f}ms  peak={summ['peak_temp_c']}C  "
-              f"above_knee={summ['time_above_knee_s']}s")
+    pool = None if is_mock else wl.FixedWorkPool(args.parallel)
+    try:
+        for i, (rep, mode) in enumerate(schedule):
+            if cool_target is not None:
+                cd = runner.cool_to(b, cool_target, verbose=False)
+                if not cd["ok"]:
+                    print(f"  [warn] cooldown incomplete before run {i} "
+                          f"({cd.get('reason')}, at {cd.get('final_temp_c')}C)")
+            seq = wl.order_sequence(multiset, mode, rng)
+            jobs, tele, summ = run_one_sequence(
+                b, seq, knee_c, args.hz, is_mock,
+                hot_power=1.45, cool_power=0.55, pool=pool)
+            summ.update({"rep": rep, "mode": mode, "run_index": i,
+                         "start_temp_c": cd.get("final_temp_c") if cool_target else None,
+                         "session_t": time.monotonic() - t_session})
+            results.append(summ)
+            for j in jobs:
+                j.update({"rep": rep, "mode": mode, "run_index": i})
+            all_jobs.extend(jobs)
+            for s in tele:
+                s.update({"run_index": i, "mode": mode})
+            all_tele.extend(tele)
+            print(f"  run {i+1}/{len(schedule)} rep={rep} {mode:12s} "
+                  f"p99={summ['p99_ms']:7.1f}ms  peak={summ['peak_temp_c']}C  "
+                  f"above_knee={summ['time_above_knee_s']}s")
+    finally:
+        if pool is not None:
+            pool.stop()
 
     meta = {
         "experiment": "exp3_ordering",
         "backend": b.name, "mock": is_mock,
         "knee_c": knee_c,
+        "threshold": th,
+        "time_above_knee_available": knee_c is not None,
         "k_jobs": args.k, "hot_frac": args.hot_frac,
         "reps": args.reps, "orderings": modes,
         "cold_latency_match": vm,
+        "workload": {k: wk.get(k) for k in ("accepted", "mock", "frozen",
+                                             "validation_run", "report")},
+        "parallel": args.parallel,
+        "multiset_planned": planned,
+        "planned_identical_across_runs": all(r["planned"] == planned
+                                             for r in results),
+        "energy_measured": False,
         "idle_temp_c": idle, "cool_target_c": cool_target,
         "runs": results,
     }
@@ -222,4 +365,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
