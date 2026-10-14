@@ -11,12 +11,15 @@
 #   - under-voltage: get_throttled bit 0 now, or sticky bit 16 newly set
 #   - 3 consecutive failed temperature or throttle-flag reads
 #   - the run lasts longer than MAX_RUN_S (default 7200 s; operational
-#     backstop, not a pre-registered threshold; worst case run is ~65 min)
-# Stop = SIGTERM (the validator then stops its worker pools and writes
-# report.json with the interruption recorded); SIGKILL only if it is still
-# alive after GRACE_S. The validator's worker processes exit on their own
-# when their parent dies; any recorded worker still alive afterwards is
-# terminated too.
+#     backstop, not a pre-registered threshold)
+# Stop = ONE SIGTERM (the validator then stops its worker pools and writes
+# report.json with the interruption recorded). NO SIGKILL: if the validator is
+# still alive after GRACE_S, the monitor logs "INTERVENTION REQUIRED" and keeps
+# logging readings, without further signals, until it exits. The validator's
+# workers exit on their own when their parent dies; a recorded worker still
+# alive afterwards gets one SIGTERM, and one still alive 10 s later is logged
+# as "INTERVENTION REQUIRED" (never SIGKILLed). The final line says
+# "monitor exit (...; INTERVENTION REQUIRED)" whenever that happened.
 #
 # SAFETY OF PROCESS IDENTIFICATION: the monitor refuses to start unless
 # <validator_pid> is a live process whose command line contains
@@ -30,10 +33,11 @@
 # Events are logged to <run_dir>/monitor.log. The monitor exits when the
 # validator exits. It never changes any hardware setting.
 #
-# Launch (see README "Launching the workload validation"): start the validator
-# detached with --run-id, wait for its run directory, then start this script
-# detached with the validator's PID and that directory. Both are under
-# setsid nohup, so an SSH disconnection affects neither.
+# Launch: start the validator detached with --run-id and --require-monitor,
+# wait for its run directory, then start this script detached with the
+# validator's PID and that directory. The launcher verifies this monitor and
+# only then writes <run_dir>/MONITOR_OK; the validator does no load before
+# that (monitor_guard.py). Both run under setsid nohup.
 
 set -u
 
@@ -101,6 +105,19 @@ record_children() {
     done
 }
 
+INTERVENTION=0     # set when a process survives its one SIGTERM (never SIGKILLed)
+
+# one temperature reading line, no limit checks (used while waiting without signals)
+log_reading() {
+    local t th
+    t=$(cat "$THERMAL" 2>/dev/null); th=$(vcgencmd get_throttled 2>/dev/null | cut -d= -f2)
+    if [[ "$t" =~ ^[0-9]+$ ]] && [[ "$th" =~ ^0x[0-9a-fA-F]+$ ]]; then
+        log "$(printf '%6.1f' "$(echo "$t/1000" | bc -l)")   $th"
+    else
+        log "READ FAILURE while waiting (temp='$t' flags='$th')"
+    fi
+}
+
 cleanup_children() {
     local c left=0 i
     for i in 1 2 3 4 5; do          # workers exit by themselves within ~0.5 s
@@ -111,17 +128,36 @@ cleanup_children() {
         [ $left -eq 0 ] && break
         sleep 1
     done
-    for c in "${!CHILD_START[@]}"; do
+    [ $left -eq 0 ] && return 0
+    for c in "${!CHILD_START[@]}"; do      # one SIGTERM per verified leftover worker
         if same_proc "$c" "${CHILD_START[$c]}" multiprocessing; then
             log "worker $c still alive after validator exit -> SIGTERM"
             kill -TERM "$c" 2>/dev/null
-            sleep 2
-            if same_proc "$c" "${CHILD_START[$c]}" multiprocessing; then
-                log "worker $c still alive -> SIGKILL"
-                kill -KILL "$c" 2>/dev/null
-            fi
         fi
     done
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        left=0
+        for c in "${!CHILD_START[@]}"; do
+            same_proc "$c" "${CHILD_START[$c]}" multiprocessing && left=1
+        done
+        [ $left -eq 0 ] && return 0
+        sleep 1
+    done
+    for c in "${!CHILD_START[@]}"; do      # no SIGKILL: report and leave for a person
+        if same_proc "$c" "${CHILD_START[$c]}" multiprocessing; then
+            log "worker $c (start ${CHILD_START[$c]}) still alive 10s after SIGTERM -> no SIGKILL; INTERVENTION REQUIRED"
+            INTERVENTION=1
+        fi
+    done
+}
+
+finish_monitor() {   # $1 = how the run ended
+    if [ "$INTERVENTION" = 1 ]; then
+        log "monitor exit ($1; INTERVENTION REQUIRED)"
+    else
+        log "monitor exit ($1)"
+    fi
+    exit 0
 }
 
 stop_validator() {
@@ -134,8 +170,17 @@ stop_validator() {
             waited=$((waited + 1))
         done
         if same_proc "$VPID" "$VSTART" validate_workload.py; then
-            log "validator still alive after ${GRACE_S}s -> SIGKILL"
-            kill -KILL "$VPID" 2>/dev/null
+            log "validator still alive after ${GRACE_S}s -> no SIGKILL; INTERVENTION REQUIRED"
+            INTERVENTION=1
+            local n=0
+            while same_proc "$VPID" "$VSTART" validate_workload.py; do   # keep monitoring, no signals
+                record_children
+                log_reading
+                n=$((n + 1))
+                [ $((n % 12)) -eq 0 ] && log "validator $VPID still alive, no further signal; INTERVENTION REQUIRED"
+                sleep $INTERVAL_S
+            done
+            log "validator exited (after the intervention wait)"
         else
             log "validator exited ${waited}s after SIGTERM"
         fi
@@ -143,8 +188,7 @@ stop_validator() {
         log "validator already gone; nothing signalled"
     fi
     cleanup_children
-    log "monitor exit (stopped)"
-    exit 0
+    finish_monitor stopped
 }
 
 trap 'log "monitor received a signal; exiting without touching the validator"; exit 0' TERM INT HUP
@@ -183,5 +227,4 @@ while same_proc "$VPID" "$VSTART" validate_workload.py; do
 done
 log "validator $VPID exited"
 cleanup_children
-log "monitor exit (validator finished)"
-exit 0
+finish_monitor "validator finished"
