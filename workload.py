@@ -421,6 +421,7 @@ class FixedWorkPool:
         cores = list(range(P)) if cores is None else list(cores)
         ctx = mp.get_context("spawn")
         self.procs, self.conns, self.pinned = [], [], []
+        self.unstopped = []        # pids still alive after stop(); never SIGKILLed
         self._stopped = False
         try:
             for i in range(P):
@@ -452,8 +453,13 @@ class FixedWorkPool:
                "record_units": record_units}
         c0 = time.thread_time()
         t0 = time.monotonic()
-        for c in self.conns:
-            c.send(msg)
+        for i, c in enumerate(self.conns):
+            try:
+                c.send(msg)
+            except (BrokenPipeError, ConnectionResetError, EOFError) as e:
+                # the worker exited since the last job: same handling as a worker that
+                # dies during a job (block invalid, pool replaced), not a crash
+                raise WorkerFailure(f"worker {i} gone before dispatch ({type(e).__name__})")
         shards = [None] * self.P
         pending = {c: i for i, c in enumerate(self.conns)}
         deadline = t0 + self.timeout_s
@@ -482,7 +488,10 @@ class FixedWorkPool:
         return not self._stopped and all(p.is_alive() for p in self.procs)
 
     def stop(self, timeout_s: float = 5.0) -> list:
-        """Idempotent. Graceful, then terminate, then kill. Never orphans."""
+        """Idempotent. Graceful (shutdown message), then at most ONE SIGTERM
+        per worker still running. Never SIGKILL: a worker still alive after
+        that is recorded in `self.unstopped` (its pid) so the caller reports
+        INTERVENTION REQUIRED instead of claiming the pool stopped."""
         if self._stopped:
             return [p.exitcode for p in self.procs]
         self._stopped = True
@@ -495,11 +504,10 @@ class FixedWorkPool:
         for p in self.procs:
             p.join(max(0.0, deadline - time.monotonic()))
             if p.is_alive():
-                p.terminate()
+                p.terminate()                      # SIGTERM, once
                 p.join(2.0)
             if p.is_alive():
-                p.kill()
-                p.join(2.0)
+                self.unstopped.append(p.pid)
         for c in self.conns:
             c.close()
         return [p.exitcode for p in self.procs]

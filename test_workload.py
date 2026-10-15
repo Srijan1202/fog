@@ -178,6 +178,20 @@ class PoolWithTestKernels(unittest.TestCase):
         finally:
             pool.stop()
 
+    def test_worker_gone_before_dispatch_is_a_worker_failure(self):
+        # A worker that exited between two jobs must give WorkerFailure (block
+        # invalid, as PREREG specifies), not an uncaught BrokenPipeError.
+        pool = wl.FixedWorkPool(2, kernel="noop")
+        try:
+            pool.procs[1].terminate()          # test kernel worker only
+            pool.procs[1].join(3)
+            with self.assertRaises(wl.WorkerFailure):
+                pool.run_job(wl.JobSpec("HOT", 2, 8, 1))
+        finally:
+            pool.stop()
+        self.assertEqual(pool.unstopped, [])
+        self.assertFalse(any(p.is_alive() for p in pool.procs))
+
     @unittest.skipUnless(hasattr(os, "sched_setaffinity") and (os.cpu_count() or 1) >= 2,
                          "core pinning needs Linux and 2+ cores")
     def test_workers_are_pinned_to_cores(self):

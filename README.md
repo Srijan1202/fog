@@ -68,7 +68,7 @@ power supply throughout. Log room temperature at the start of every session.
 python3 probe.py                                    # Experiment 0   (5 min)
 python3 exp1_thermal.py --minutes 15 --outdir results     # Exp 1  (~30 min)
 python3 exp2_curve.py --stages 8 --outdir results         # Exp 2  (~2 h)
-# workload validation (A2; separate approval) - launch with the watchdog, see below
+# workload validation (A2; separate approval) - only via tools/launch_validation.sh, see below
 python3 exp3_ordering.py --reps 10 --k 60 --parallel 4 \
     --workload-validation results/workload_validation/<run>/report.json \
     --exp1-meta results/exp1.meta.json --outdir results           # Exp 3 (~4-6 h)
@@ -84,37 +84,94 @@ python3 exp1_thermal.py --backend mock --minutes 2 --cool-minutes 2 --outdir res
 
 ### Launching the workload validation
 
-Only with explicit approval. **Start only after the Pi has been idle for at least
-15 minutes**: the validator measures its idle baseline in the first 30 s, and
-every block must start within 2 °C of it, so a warm start raises every block's
-start threshold. Check the governor (`performance` on all cores) first.
+Only with explicit approval, and only through **`tools/launch_validation.sh`**.
+`validate_workload.py` refuses to run without `--require-monitor`, and then does no
+load until the launcher has started and verified the watchdog. Do not start the
+validator or `tools/validation_monitor.sh` by hand for a real run.
+
+Before launching:
+- The project on the Pi (`~/tdas-pilot`) must match the hashes in
+  `provenance/WORKLOAD_VALIDATION_rev3.md`; the launcher refuses other file contents.
+- The CPU governor must be `performance` on every core. Set it by hand; the
+  launcher only checks it.
+- Edit only the `# BEGIN SITE CONFIG` block of `tools/launch_validation.sh` and
+  `tools/status_validation.sh`: an unused `RUN` id, the Pi's current boot id as `B0`,
+  and (launcher) the expected file hashes.
+
+Preparation (each step with its own approval; neither starts the validator or any workload):
 
 ```bash
-cd ~/tdas-pilot
-OUT=results/workload_validation; RUN=$(date +%Y%m%d-%H%M%S); mkdir -p "$OUT"
-setsid nohup python3 -u validate_workload.py --outdir "$OUT" --run-id "$RUN" \
-    > "$OUT/$RUN.stdout.log" 2>&1 < /dev/null &
-VPID=$!
-for i in $(seq 1 40); do [ -d "$OUT/$RUN" ] && break; sleep 0.25; done
-setsid nohup bash tools/validation_monitor.sh "$VPID" "$OUT/$RUN" \
-    > /dev/null 2>&1 < /dev/null &
+ssh <pi> 'bash -s' < tools/pi_smoke_test.sh       # dummy-only smoke test of the watchdog and monitor guard
+ssh <pi> 'bash -s' < tools/idle_observation.sh    # read-only idle observation, the launcher's Phase 1 rule
 ```
 
-- The watchdog (`tools/validation_monitor.sh`) starts during the validator's
-  30 s idle window, before any load. It refuses to start unless `$VPID` is
-  `validate_workload.py` for that run id. Every 5 s it stops the validator at
-  **67 °C**, on a rise of more than 15 °C in 5 s, on under-voltage, after 3
-  failed reads, or after 2 h. It logs to `$OUT/$RUN/monitor.log`.
-- **Stopping:** the watchdog, or an operator with `kill -TERM $VPID`, sends
-  SIGTERM. The validator stops its worker pools and writes `report.json` with
-  `interrupted` set and `overall: INCOMPLETE`. If it is still alive after 30 s,
-  the watchdog sends SIGKILL. Worker processes exit by themselves within about
-  0.5 s of their parent dying, and the watchdog terminates any that remain.
-- **SSH disconnection** affects neither process: both run under
-  `setsid nohup` with no terminal.
-- **Results:** `$OUT/$RUN/report.json`. Experiment 3 accepts only a report with
+`pi_smoke_test.sh` refuses unless every project file matches its pinned hashes, records the device,
+boot id and software versions, and exercises the barrier, watchdog stop paths and cleanup with dummy
+processes only (exit 0 = SMOKE PASS). `idle_observation.sh` applies exactly the launcher's idle rule and
+hard stops (exit 0 PASS, 1 NOT STABLE, 2 NOT EVALUABLE, 3 hard stop, 4 interrupted). Both write a new
+record under `~/tdas-pilot/observations/` (with a `.sha256`) and never overwrite one. Neither is evidence
+of thermal safety under load.
+
+The launch and status scripts also run on the Pi through stdin; they are never stored or run from the Pi's copy:
+
+```bash
+ssh <pi> 'bash -s' < tools/launch_validation.sh   # exit 0 = monitoring established
+ssh <pi> 'bash -s' < tools/status_validation.sh   # read-only report every 60 s; re-run to re-attach
+```
+
+The launcher:
+1. Watches the idle Pi (a sample every 30 s; checks at 15, 20, 25 and 30 min) and
+   continues at the first check where the two 5-minute means differ by ≤ 0.5 °C and
+   the 10-minute least-squares slope is ≤ 0.05 °C/min. It stops on ≥ 50 °C, any
+   throttle or under-voltage flag, a boot-id or governor change, a conflicting
+   process, an unreadable sensor, or missing or irregular samples. This is idle
+   screening only, not evidence of thermal safety under load.
+2. Checks file and archive hashes, that the run's output paths do not exist, free
+   disk and load.
+3. Starts the validator (`--require-monitor 120`). It writes `prereg.json`, then waits.
+4. Verifies the validator: pid, start time, executable, exact command line, own
+   session, no child processes, waiting at its barrier.
+5. Starts the watchdog with `MAX_RUN_S=21600` and verifies it the same way, plus its
+   `monitor.log` start line (which must show the 21600 s cap) and a fresh reading.
+6. Only then writes `MONITOR_OK`. The validator checks the watchdog itself before
+   it starts its idle window and load.
+
+Exit status: 0 monitoring established; 3 nothing launched; 4 launched but monitoring
+not established (the validator exits at its barrier without load); 5 `MONITOR_OK`
+written but not acknowledged within 15 s (no signal sent; run the status script).
+
+During the run:
+- The watchdog checks every 5 s and stops the run at **67 °C**, on a rise of more
+  than 15 °C in 5 s, on under-voltage (bit 0 now, or bit 16 newly set), after 3
+  failed reads, or at `MAX_RUN_S`. The launcher passes 21600 s (6 h) and verifies
+  it; if the watchdog is started by hand without `MAX_RUN_S`, it falls back to
+  7200 s (2 h). Other throttle flags (bits 1-3) invalidate the affected block in
+  the validator's own guard; they do not stop the run.
+- The validator re-checks the watchdog before each block, after each job, during
+  cooldowns and in the idle window, and stops itself if the watchdog is gone or its
+  log is more than 30 s old.
+- **Signals: SIGTERM only, never SIGKILL; each sender sends the validator at most
+  one.** The watchdog sends one at a limit or at the cap; the launcher sends one only
+  if monitoring could not be established and the verified validator is still at its
+  barrier with no children; the status script sends one only if the watchdog is
+  confirmed absent and the verified validator is still running 60 s later. A process
+  still alive after its SIGTERM is reported as **INTERVENTION REQUIRED** and left for
+  a person.
+- On SIGTERM the validator stops its worker pools (shutdown message, then one SIGTERM
+  per worker still running; Python's exit handler may send a surviving worker one
+  more, and the watchdog sends one to any worker left after the validator exits) and
+  writes `report.json` with `overall: INCOMPLETE` and `interrupted` set. A run stopped at the 6 h cap is therefore INCOMPLETE; 6 h is a
+  maximum, not a promise that the run completes.
+- **SSH disconnection** does not stop a launched run: the validator and the watchdog
+  run under `setsid nohup`. If the launcher is lost before `MONITOR_OK`, the validator
+  exits at its barrier without load. Losing the status script only ends that observer;
+  it never restarts anything.
+- **Results:** `$OUT/$RUN/report.json` and `report.txt`; watchdog log
+  `$OUT/$RUN/monitor.log`. Experiment 3 accepts only a report with
   `overall: COMPLETE`, no interruption, and an ACCEPTED configuration for its
   `--parallel`, made with the current `workload.py`.
+
+Worst-case run time, computed from the sources: `python3 tools/runtime_budget.py`.
 
 **Choosing `k` for Experiment 3.** Experiment 1 prints a `tau/horizon` table.
 Pick `k` so `tau/horizon` lands near 1. This is the corrected P3 criterion —

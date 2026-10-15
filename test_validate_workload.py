@@ -584,6 +584,79 @@ class ExecutorGuards(unittest.TestCase):
                        "pid", True, False)
 
 
+class FakeGuard:
+    """Stands in for monitor_guard.MonitorGuard in main() tests (software only;
+    the real guard is tested against dummy watchdog processes)."""
+    why, made = None, []
+
+    def __init__(self, root, run_id, **kw):
+        self.root, self.run_id = root, run_id
+
+    def wait(self, timeout_s):
+        FakeGuard.made.append((self.root, self.run_id, timeout_s))
+        return FakeGuard.why
+
+    def raise_if_lost(self):
+        pass
+
+    def describe(self):
+        return {"fake_guard": True}
+
+
+class WorkerFailureInvalidatesBlock(unittest.TestCase):
+    """A worker failure - including a worker that exited between two jobs of a
+    block (formerly an uncaught BrokenPipeError) - makes the block invalid: it is
+    stored under discarded/, rerun at the same position, and never counted."""
+
+    def test_worker_killed_between_jobs_invalidates_the_block(self):
+        holder = {}
+
+        def temp(n):
+            # telemetry off: read 1 cooldown, 2 flags before, 3 check after job 1
+            if n == 3:
+                p = holder["ex"].pools[1].procs[0]
+                p.terminate()                      # 'noop' test worker only
+                p.join(3)
+            return 45.0
+
+        ex = vw.HardwareExecutor(FakeBackend(temp_fn=temp), 45.0, prereg=TEST_PREREG,
+                                 kernel="noop", log=quiet, poll_s=0.01)
+        self.addCleanup(ex.close)
+        holder["ex"] = ex
+        res = ex.execute("T-e1", "acceptance", "T", vw.pair_plan(2, T_HOT, T_COOL),
+                         "pid", False, False)
+        self.assertFalse(res.valid)
+        self.assertTrue(res.reason.startswith("WorkerFailure"), res.reason)
+        self.assertEqual(len(res.jobs), 1)
+        self.assertNotIn(1, ex.pools)              # the broken pool was replaced
+        self.assertEqual(ex.close(), [])
+
+    def test_worker_failure_block_is_discarded_rerun_and_not_counted(self):
+        fx = FakeExec()
+
+        def execute(block_id, phase, position, plan, params_id, tel, rec):
+            res = fx(block_id, phase, position, plan, params_id, tel, rec)
+            if block_id == "P1-A2-e1":
+                return vw.BlockResult(block_id, phase, position, False,
+                                      "WorkerFailure: worker 0 gone before dispatch "
+                                      "(BrokenPipeError)", res.jobs[:3],
+                                      params_id=params_id, telemetry_on=tel)
+            return res
+
+        tmp = tempfile.mkdtemp(prefix="vw_wf_")
+        out = vw.ConfigRun(1, V0, execute, vw.Store(tmp), log=quiet).run()
+        self.assertEqual(out["status"], vw.ACCEPTED)
+        self.assertNotIn("P1-A2-e1", out["acceptance_blocks"])
+        self.assertIn("P1-A2-e2", out["acceptance_blocks"])
+        self.assertEqual(out["reruns_used"], 1)
+        bad = next(h for h in out["history"] if h["block_id"] == "P1-A2-e1")
+        self.assertFalse(bad["valid"])
+        self.assertTrue(bad["reason"].startswith("WorkerFailure"))
+        self.assertTrue(os.path.exists(os.path.join(tmp, "discarded", "P1-A2-e1.json")))
+        self.assertFalse(os.path.exists(os.path.join(tmp, "blocks", "P1-A2-e1.json")))
+        self.assertEqual(out["evaluation"]["gap"]["n_pairs"], 40)
+
+
 class Main(unittest.TestCase):
     """main(): --plan, refusals, and report writing. Software only."""
 
@@ -591,9 +664,11 @@ class Main(unittest.TestCase):
         self.tmp = tempfile.mkdtemp(prefix="vw_main_")
         self.out = os.path.join(self.tmp, "out")
         self.pool_boom = mock.Mock(side_effect=AssertionError("no pool may start"))
+        FakeGuard.why, FakeGuard.made = None, []
 
     def call(self, argv, backend=None, run_all=None, window=0.2):
         patches = [mock.patch.object(vw.wl, "FixedWorkPool", self.pool_boom),
+                   mock.patch.object(vw.mg, "MonitorGuard", FakeGuard),
                    mock.patch.dict(vw.PREREG, {"idle_window_s": window})]
         if backend is not None:
             patches.append(mock.patch.object(vw.sensors, "get_backend",
@@ -627,18 +702,18 @@ class Main(unittest.TestCase):
     def test_mock_backend_is_refused(self):
         m = mock.Mock()
         m.name = "mock"
-        rc, _ = self.call(["--outdir", self.out], backend=m)
+        rc, _ = self.call(["--require-monitor", "1", "--outdir", self.out], backend=m)
         self.assertEqual(rc, 2)
         self.assertFalse(os.path.exists(self.out))
 
     def test_existing_run_directory_is_refused(self):
         os.makedirs(os.path.join(self.out, "r1"))
-        rc, out = self.call(["--outdir", self.out, "--run-id", "r1"], backend=FakeBackend())
+        rc, out = self.call(["--require-monitor", "1", "--outdir", self.out, "--run-id", "r1"], backend=FakeBackend())
         self.assertEqual(rc, 2)
         self.assertIn("refusing to overwrite", out)
 
     def test_no_idle_readings_refuses_before_any_pool(self):
-        rc, _ = self.call(["--outdir", self.out, "--run-id", "r2"],
+        rc, _ = self.call(["--require-monitor", "1", "--outdir", self.out, "--run-id", "r2"],
                           backend=FakeBackend(temp=None))
         self.assertEqual(rc, 2)
         rep = self.report("r2")
@@ -653,7 +728,7 @@ class Main(unittest.TestCase):
             checkpoint()
             raise KeyboardInterrupt("SIGTERM")
 
-        rc, _ = self.call(["--outdir", self.out, "--run-id", "r3"],
+        rc, _ = self.call(["--require-monitor", "1", "--outdir", self.out, "--run-id", "r3"],
                           backend=FakeBackend(), run_all=fake_run_all)
         self.assertEqual(rc, 130)
         rep = self.report("r3")
@@ -661,14 +736,47 @@ class Main(unittest.TestCase):
         self.assertIn("SIGTERM", rep["interrupted"])
         self.assertEqual(rep["configs"]["1"]["status"], vw.ACCEPTED)
         self.assertEqual(rep["idle_baseline_c"], 45.0)
+        self.assertEqual(rep["monitor"], {"fake_guard": True})
         self.assertTrue(os.path.exists(os.path.join(self.out, "r3", "report.txt")))
         self.assertFalse(any(n.endswith(".tmp")
                              for n in os.listdir(os.path.join(self.out, "r3"))))
 
+    def test_run_without_require_monitor_is_refused_before_anything(self):
+        for argv in (["--outdir", self.out, "--run-id", "r5"],
+                     ["--require-monitor", "0", "--outdir", self.out, "--run-id", "r5"],
+                     ["--require-monitor", "-3", "--outdir", self.out, "--run-id", "r5"],
+                     ["--require-monitor", "nan", "--outdir", self.out, "--run-id", "r5"]):
+            gb = mock.Mock(side_effect=AssertionError("no sensor may be read"))
+            with mock.patch.object(vw.sensors, "get_backend", gb):
+                rc, out = self.call(argv)
+            self.assertEqual(rc, 2, argv)
+            self.assertIn("--require-monitor SECONDS (> 0) is mandatory", out)
+            gb.assert_not_called()
+        self.assertFalse(os.path.exists(self.out))
+        self.assertEqual(FakeGuard.made, [])
+        self.pool_boom.assert_not_called()
+
+    def test_barrier_refusal_writes_report_reads_nothing_starts_nothing(self):
+        FakeGuard.why = "no verified watchdog within 1 s: MONITOR_OK not written"
+        b = FakeBackend()
+        run_all = mock.Mock(side_effect=AssertionError("run_all must not start"))
+        rc, _ = self.call(["--require-monitor", "1", "--outdir", self.out, "--run-id", "r6"],
+                          backend=b, run_all=run_all)
+        self.assertEqual(rc, 2)
+        rep = self.report("r6")
+        self.assertEqual(rep["overall"], vw.INCOMPLETE)
+        self.assertIn("refused: monitoring not established", rep["reason"])
+        self.assertNotIn("idle_baseline_c", rep)
+        self.assertEqual(b.n, 0)                       # no idle-window read
+        run_all.assert_not_called()
+        self.pool_boom.assert_not_called()
+        self.assertEqual(FakeGuard.made[0][1:], ("r6", 1.0))
+        self.assertTrue(os.path.exists(os.path.join(self.out, "r6", "prereg.json")))
+
     def test_signal_handlers_restored_after_main(self):
         import signal
         before = signal.getsignal(signal.SIGTERM)
-        self.call(["--outdir", self.out, "--run-id", "r4"], backend=FakeBackend(temp=None))
+        self.call(["--require-monitor", "1", "--outdir", self.out, "--run-id", "r4"], backend=FakeBackend(temp=None))
         self.assertEqual(signal.getsignal(signal.SIGTERM), before)
 
 

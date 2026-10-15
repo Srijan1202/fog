@@ -71,13 +71,26 @@ class RaspberryPiBackend(SensorBackend):
     def _throttle(self):
         if not self.vcgencmd:
             return None
+        # Not subprocess.run(timeout=...): on timeout that SIGKILLs the child. Here a
+        # hung vcgencmd gets ONE SIGTERM and the reading counts as unreadable (None);
+        # it is never SIGKILLed.
         try:
-            out = subprocess.run(
-                [self.vcgencmd, "get_throttled"],
-                capture_output=True, text=True, timeout=2,
-            ).stdout.strip()
+            p = subprocess.Popen([self.vcgencmd, "get_throttled"], stdout=subprocess.PIPE,
+                                 stderr=subprocess.DEVNULL, text=True)
+        except Exception:
+            return None
+        try:
+            out, _ = p.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            p.terminate()
+            try:
+                p.communicate(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
+            return None
+        try:
             # format: throttled=0x50005
-            return int(out.split("=")[1], 16)
+            return int(out.strip().split("=")[1], 16)
         except Exception:
             return None
 
