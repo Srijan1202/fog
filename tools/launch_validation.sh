@@ -39,7 +39,7 @@ LAUNCH_PATH=/usr/sbin:/usr/bin:/sbin:/bin
 LAUNCH_LANG=en_GB.UTF-8
 ARCHIVES="results/exp1_1core results/exp1_4core"
 EXPECTED_HASHES='
-9b6172ea58a3a2badfabc9a0164195646e34c4f25d3d29b8a0c86bc71330c8eb validate_workload.py
+0b5ce770e3281f3f2ea98808d6a3084ae1a68f9d450155cad5c3c8c28a9f36ca validate_workload.py
 31b6d8f6955798a4395baeaa8733e8a13b16e600f12cfcd071e00354641ad152 workload.py
 acc4d28a6f422fb22c307da3574e26efb3129610e73616bb49f7b719f9f454e3 monitor_guard.py
 31665b5a42dce04b1d97dc66be2df7fc44cba97a7c72f285cad53beb2f59a285 runner.py

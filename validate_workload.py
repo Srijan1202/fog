@@ -5,15 +5,23 @@ workload: V0 (unit + overhead), V1 (P=1), V2 (P=4), V4 (telemetry, descriptive).
 V3 (frequency caps) is excluded. Pre-registration: PREREG_workload_validation.md.
 
     python3 validate_workload.py --plan                  # print the plan; no load
-    python3 validate_workload.py --outdir results/workload_validation --run-id <id>
 
-Runs only on real hardware (the mock backend is refused). Run it only with
-explicit approval, detached (setsid nohup), together with the external
-watchdog tools/validation_monitor.sh, and only after the Pi has been idle
-for at least 15 minutes (the idle baseline is measured at start; a warm start
-raises every block's start threshold). See README "Launching the workload
-validation". On SIGTERM or Ctrl+C the run stops, the worker pools are shut
-down, and report.json is written with the interruption recorded.
+A run is started ONLY by tools/launch_validation.sh (explicit approval; see
+README "Launching the workload validation"). It runs the validator detached
+with --require-monitor, which is mandatory: without it the validator refuses
+before reading a sensor or writing a file. The validator then writes
+prereg.json and waits, with no load, until <run>/MONITOR_OK names a watchdog
+(tools/validation_monitor.sh) that it verifies itself (monitor_guard.py); if
+that does not happen in time it exits without load. During the run it stops
+by itself if the watchdog is lost. Runs only on real hardware (the mock
+backend is refused), after the launcher's idle screening.
+
+On SIGTERM (from the watchdog or the launch/status scripts, at most one from
+each; never SIGKILL) or Ctrl+C, the run stops, the worker pools get a shutdown
+message and then one SIGTERM per worker still running, and report.json is
+written as INCOMPLETE with the interruption recorded; workers still alive are
+listed as intervention_required. The watchdog stops the run at its MAX_RUN_S cap
+(21600 s, passed and verified by the launcher); such a run is INCOMPLETE.
 """
 
 from __future__ import annotations
@@ -646,7 +654,13 @@ class HardwareExecutor:
             try:
                 for item in plan:
                     spec = item["spec"]
-                    rec = self.pool(spec.P).run_job(spec, record_units=record_units)
+                    # Pools are (re)started only before the cooldown. Inside a block a
+                    # pool that lost a worker is a worker failure (block invalid, as
+                    # PREREG specifies), never a silent mid-block replacement.
+                    p = self.pools.get(spec.P)
+                    if p is None or not p.alive():
+                        raise wl.WorkerFailure(f"pool P={spec.P} lost a worker during the block")
+                    rec = p.run_job(spec, record_units=record_units)
                     rec.update(pair=item.get("pair"), pos=item.get("pos"),
                                block=block_id, seq=len(jobs))
                     jobs.append(rec)
@@ -891,14 +905,20 @@ def main(argv=None):
     ap.add_argument("--run-id", default=None)
     ap.add_argument("--backend", default=None)
     ap.add_argument("--require-monitor", type=float, default=None, metavar="SECONDS",
-                    help="after writing prereg.json, wait up to SECONDS for a verified "
-                         "watchdog (<run>/MONITOR_OK, see monitor_guard.py) before any "
-                         "load; exit without load if it is not verified; stop the run "
-                         "if the watchdog is lost later")
+                    help="MANDATORY for a run: after writing prereg.json, wait up to "
+                         "SECONDS for a verified watchdog (<run>/MONITOR_OK, see "
+                         "monitor_guard.py) before any load; exit without load if it is "
+                         "not verified; stop the run if the watchdog is lost later. "
+                         "tools/launch_validation.sh passes it.")
     args = ap.parse_args(argv)
     if args.plan:
         print(json.dumps({"prereg": PREREG, "sha256": file_hashes()}, indent=1))
         return 0
+    if args.require_monitor is None or not args.require_monitor > 0:
+        # No unmonitored runs: refused before any sensor read, file or pool.
+        print("refused: --require-monitor SECONDS (> 0) is mandatory; launch with "
+              "tools/launch_validation.sh, which starts and verifies the watchdog.")
+        return 2
     b = sensors.get_backend(args.backend)
     if b.name == "mock":
         print("validate_workload.py needs real hardware; use --plan to inspect.")
@@ -919,27 +939,25 @@ def main(argv=None):
     signal.signal(signal.SIGTERM, _sigterm)
     report = new_report()
     report.update(run_id=run_id, pid=os.getpid())
-    ex, rc, guard = None, 0, None
+    ex, rc = None, 0
     try:
-        if args.require_monitor is not None:
-            # Barrier: no worker pool, idle window or load until a watchdog for
-            # THIS process and run is verified (monitor_guard.py).
-            guard = mg.MonitorGuard(root, run_id)
-            print(f"[validate] run {run_id}: waiting up to {args.require_monitor:.0f} s "
-                  f"for a verified watchdog (no load until then)", flush=True)
-            why = guard.wait(args.require_monitor)
-            if why:
-                report["reason"] = f"refused: monitoring not established ({why})"
-                rc = 2
-                return rc
-            report["monitor"] = guard.describe()
-            print(f"[validate] monitoring verified: {guard.describe()}", flush=True)
+        # Barrier (always): no worker pool, idle window or load until a watchdog
+        # for THIS process and run is verified (monitor_guard.py).
+        guard = mg.MonitorGuard(root, run_id)
+        print(f"[validate] run {run_id}: waiting up to {args.require_monitor:.0f} s "
+              f"for a verified watchdog (no load until then)", flush=True)
+        why = guard.wait(args.require_monitor)
+        if why:
+            report["reason"] = f"refused: monitoring not established ({why})"
+            rc = 2
+            return rc
+        report["monitor"] = guard.describe()
+        print(f"[validate] monitoring verified: {guard.describe()}", flush=True)
         print(f"[validate] run {run_id}: measuring idle baseline "
               f"({PREREG['idle_window_s']:.0f} s). Start only after >= 15 min idle.")
         vals, end = [], time.monotonic() + PREREG["idle_window_s"]
         while time.monotonic() < end:
-            if guard is not None:
-                guard.raise_if_lost()
+            guard.raise_if_lost()
             t = b.read().get("temp_c")
             if t is not None:
                 vals.append(t)
@@ -953,8 +971,7 @@ def main(argv=None):
         idle = float(np.median(vals))
         report.update(idle_baseline_c=idle,
                       idle_window=[min(vals), max(vals), len(vals)])
-        ex = HardwareExecutor(b, idle,
-                              monitor_check=guard.raise_if_lost if guard else None)
+        ex = HardwareExecutor(b, idle, monitor_check=guard.raise_if_lost)
         run_all(ex.execute, store, report=report,
                 checkpoint=lambda: store.json("report.json", report))
     except KeyboardInterrupt as e:

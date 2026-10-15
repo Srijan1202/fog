@@ -1,6 +1,7 @@
 # Operational addendum to PREREG_workload_validation.md (launch plan wv-20261015-01, rev3)
 
-Status: DRAFT for review. Committed on branch `launch-plan-rev3`; NOT deployed to the Pi.
+Status: DRAFT for review (not formally approved). On branch `launch-plan-rev3`, with uncommitted
+integration changes; NOT deployed to the Pi.
 
 `PREREG_workload_validation.md` itself is **unchanged** (sha256 `05ab24e5ea4c8bad9e356990328a9b1b4529c1f40d95b08f73471b0d28ece864`),
 and so is the `PREREG` constants dict in `validate_workload.py` (diff-checked against the repository original).
@@ -9,7 +10,9 @@ how the run is launched, supervised and stopped, and two code corrections. Each 
 traced to a file and a test in this folder.
 
 ## 1. Launch and supervision (operational, not a pre-registered threshold)
-- The validator is started with `--require-monitor 120`. It writes `prereg.json` and then waits at a
+- The validator is started only by `tools/launch_validation.sh`, with `--require-monitor 120`.
+  The flag is mandatory: without it the validator refuses before reading a sensor or writing a
+  file. It writes `prereg.json` and then waits at a
   **no-load barrier** (no worker pool, no idle window, no load) until `<run>/MONITOR_OK` names a watchdog
   that the validator verifies itself: watchdog pid and start time, executable `bash`, argv naming
   `validation_monitor.sh`, this validator's pid and this run directory, and a fresh `monitor.log` with this
@@ -40,6 +43,11 @@ under the rule in force at the time.
   (block invalid, pool replaced, rerun budget applies), as PREREG "Guards and invalid blocks" already
   specifies ("invalid ... on a worker failure"). Before, the dispatch raised an uncaught
   `BrokenPipeError` and the validator left the run through an unhandled exception.
+- `validate_workload.main`: `--require-monitor` is mandatory for every run (no unmonitored path).
+- `validate_workload.HardwareExecutor.execute`: a pool that lost a worker between two jobs of a block
+  now raises `WorkerFailure` (block invalid). Before (also in the original code), the executor silently
+  started a new pool mid-block and the block could still count as valid, contrary to PREREG. Pools are
+  (re)started only before a block's cooldown.
 - `validate_workload.HardwareExecutor._stop_pool`: tolerates pool objects without an `unstopped`
   attribute (found by the repository unit test suite; real pools always have it).
 
