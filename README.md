@@ -66,7 +66,7 @@ power supply throughout. Log room temperature at the start of every session.
 
 ```bash
 python3 probe.py                                    # Experiment 0   (5 min)
-python3 exp1_thermal.py --minutes 15 --outdir results     # Exp 1  (~30 min)
+# Exp 1 (~30 min; separate approval) - only via tools/launch_exp1.sh, see below
 python3 exp2_curve.py --stages 8 --outdir results         # Exp 2  (~2 h)
 # workload validation (A2; separate approval) - only via tools/launch_validation.sh, see below
 python3 exp3_ordering.py --reps 10 --k 60 --parallel 4 \
@@ -81,6 +81,25 @@ Pipeline check without hardware (**simulated — never report as a result**):
 python3 probe.py --backend mock
 python3 exp1_thermal.py --backend mock --minutes 2 --cool-minutes 2 --outdir results_mock
 ```
+
+### Launching Experiment 1 (four-core thermal / throttle knee)
+
+Only with explicit approval, and only through **`tools/launch_exp1.sh`** (status:
+`tools/status_exp1.sh`). On real hardware `exp1_thermal.py` refuses to run without
+`--require-monitor`; the mock backend may run without it, for pipeline checks only.
+The launch follows the workload-validation procedure below (idle screen, identity
+checks, no-load barrier, `MONITOR_OK`, SIGTERM only, never SIGKILL), with these
+differences:
+- It runs `exp1_thermal.py --workers 4 --minutes 15` into a fresh `results/<RUN>`
+  directory and pins `exp1_thermal.py`, `analyze.py`, `workload.py`, `monitor_guard.py`,
+  `runner.py`, `sensors.py` and `tools/exp1_monitor.sh`.
+- The watchdog is `tools/exp1_monitor.sh`: the same stop rules as the validation
+  watchdog, but it stops at **85.0 °C** (the run has to reach firmware throttling,
+  around 80 °C on a Pi 4) and has a 45 min cap (`CAP=2700`).
+- Any stop (85 °C, under-voltage, read failures, cap, a lost watchdog, an operator
+  SIGTERM) still writes `exp1.meta.json`, marked ABORTED, which is INCONCLUSIVE for G1. Only
+  a complete, unstopped four-core run can establish the throttle knee that
+  Experiment 3 needs (Amendment A1).
 
 ### Launching the workload validation
 

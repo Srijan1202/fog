@@ -15,7 +15,16 @@ which case one process loads exactly one core. --workers 1 (the default) is
 the original single-process behavior. Keep 1-core and N-core results in
 separate --outdir directories; they are different characterizations.
 
-Outputs: results/exp1.{meta.json,telemetry.jsonl}
+On real hardware a run needs --require-monitor SECONDS (tools/launch_exp1.sh
+passes it): exp1 creates a FRESH --outdir, then waits, with no load, until
+<outdir>/MONITOR_OK names a verified external watchdog (tools/exp1_monitor.sh,
+checked by Exp1Guard = monitor_guard's barrier). It stops itself if the
+watchdog is lost. On SIGTERM, Ctrl+C or a lost watchdog the heating stops, the
+workers get a stop request and at most one SIGTERM each (never SIGKILL), and
+exp1.meta.json is still written, marked ABORTED (INCONCLUSIVE for G1). The
+mock backend may run without the barrier (pipeline checks only).
+
+Outputs: results/exp1.{meta.json,telemetry.jsonl} (+ exp1.start.json with --require-monitor)
 """
 
 from __future__ import annotations
@@ -26,14 +35,18 @@ import multiprocessing as mp
 import os
 import queue
 import signal
+import sys
 import time
 
 import numpy as np
 
 import analyze
+import monitor_guard as mg
 import sensors
 import runner
 import workload as wl
+
+EXP1_WATCHDOG = "exp1_monitor.sh"
 
 
 def fit_exponential(t, y, cooling: bool):
@@ -137,6 +150,7 @@ class HeatWorkers:
                               os.getpid(), self.q))
             for i in range(workers)]
         self.reports, self.forced, self._stopped = {}, [], False
+        self.unstopped = []        # pids still alive after one SIGTERM (never SIGKILLed)
         for p in self.procs:
             p.start()
         try:
@@ -162,7 +176,9 @@ class HeatWorkers:
         return [p.name for p in self.procs if not p.is_alive()]
 
     def stop(self, timeout_s=5.0):
-        """Idempotent. Graceful stop, then terminate, then kill. Never orphans."""
+        """Idempotent. Graceful stop (stop event), then at most ONE SIGTERM per
+        worker still running. Never SIGKILL: a worker still alive after that is
+        listed in `self.unstopped` so the caller reports INTERVENTION REQUIRED."""
         if self._stopped:
             return self.report()
         self._stopped = True
@@ -181,11 +197,10 @@ class HeatWorkers:
             p.join(max(0.0, deadline - time.monotonic()))
             if p.is_alive():
                 self.forced.append(p.name)
-                p.terminate()
+                p.terminate()                      # SIGTERM, once
                 p.join(2.0)
             if p.is_alive():
-                p.kill()
-                p.join(2.0)
+                self.unstopped.append(p.pid)
         return self.report()
 
     def report(self):
@@ -194,13 +209,60 @@ class HeatWorkers:
             r = {"pid": p.pid, "jobs": None, "cpu_s": None, "wall_s": None}
             r.update(self.reports.get(i, {}))
             r.update({"worker": i, "exitcode": p.exitcode,
-                      "forced_stop": p.name in self.forced})
+                      "forced_stop": p.name in self.forced,
+                      "unstopped": p.pid in self.unstopped})
             out.append(r)
         return out
 
 
 def _sigterm(signum, frame):
     raise KeyboardInterrupt("SIGTERM")     # route through the same cleanup
+
+
+class Exp1Guard(mg.MonitorGuard):
+    """monitor_guard's barrier for Experiment 1. Identical checks (token with
+    this process's pid and start time, watchdog start time, bash executable,
+    fresh monitor.log with this run's start line), but the watchdog must be
+    tools/exp1_monitor.sh: argv [..., exp1_monitor.sh, <pid>, <outdir>]."""
+
+    def _watchdog_problem(self, mpid, mstart, check_exe=False):
+        if mg.proc_start(mpid) != mstart:
+            return f"watchdog pid {mpid} is not running with start time {mstart}"
+        argv = mg.proc_argv(mpid)
+        if (not argv or len(argv) < 3 or not argv[-3].endswith(EXP1_WATCHDOG)
+                or argv[-2] != str(self.pid) or argv[-1] != self.root):
+            return f"watchdog pid {mpid} argv {argv!r} does not match"
+        if check_exe:
+            exe = mg.proc_exe(mpid)
+            if not exe or os.path.basename(exe) != "bash":
+                return f"watchdog pid {mpid} executable {exe!r} is not bash"
+        return None
+
+
+def _save_early_stop(outdir, b, args, reason, guard, rc):
+    """Record a run that ended before heating (refused barrier, lost watchdog,
+    interruption). No load ran; INCONCLUSIVE for G1 by construction."""
+    meta = {"experiment": "exp1_thermal", "backend": b.name, "mock": b.name == "mock",
+            "p4_status": "ABORTED", "abort_reason": reason, "workers": args.workers,
+            "heat_minutes": args.minutes, "max_temp_c": args.max_temp,
+            "monitor": guard.describe() if guard is not None else None,
+            "knee": None, "exp1_outcome": "INCONCLUSIVE"}
+    runner.save_run(outdir, "exp1", meta, [], [])
+    print(f"[exp1] stopped before heating: {reason} (no load ran)")
+    return rc
+
+
+EXP1_HASHED = ("exp1_thermal.py", "analyze.py", "sensors.py", "runner.py", "workload.py",
+               "monitor_guard.py")
+
+
+def _sha256_file(path):
+    import hashlib
+    try:
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return None
 
 
 def _latest_temp(log):
@@ -278,7 +340,7 @@ COOL_CONSECUTIVE = 10       # readings in a row (0.5 s apart) to end cooling
 IDLE_STABLE_RANGE_C = 1.5   # max-min over the idle window to call it stable
 
 
-def measure_idle_baseline(backend, window_s, period_s=0.5):
+def measure_idle_baseline(backend, window_s, period_s=0.5, check=None):
     """Median of idle readings over window_s, with the spread recorded.
 
     A single read at launch is one noisy ~0.5 C-quantized sample; the cooling
@@ -286,6 +348,8 @@ def measure_idle_baseline(backend, window_s, period_s=0.5):
     """
     vals, end = [], time.monotonic() + window_s
     while True:
+        if check is not None:
+            check()                       # raises MonitorLost if the watchdog is gone
         t = backend.read().get("temp_c")
         if t is not None:
             vals.append(t)
@@ -425,20 +489,64 @@ def main():
     ap.add_argument("--cool-consecutive", type=int, default=COOL_CONSECUTIVE,
                     help="consecutive readings (0.5 s apart) within "
                          f"{COOL_TOL_C} C of baseline needed to end cooling early")
+    ap.add_argument("--require-monitor", type=float, default=None, metavar="SECONDS",
+                    help="MANDATORY on real hardware: create a fresh --outdir, then wait "
+                         "up to SECONDS for a verified watchdog (<outdir>/MONITOR_OK, "
+                         "tools/exp1_monitor.sh) before any load; stop if it is lost "
+                         "later. tools/launch_exp1.sh passes it.")
     args = ap.parse_args()
     if args.workers < 1:
         ap.error("--workers must be >= 1")
     if args.cool_consecutive < 2:
         ap.error("--cool-consecutive must be >= 2 (never end on one sample)")
 
+    if args.require_monitor is not None and not args.require_monitor > 0:
+        ap.error("--require-monitor must be > 0")
     b = sensors.get_backend(args.backend)
     is_mock = b.name == "mock"
     if is_mock and args.workers > 1:
         ap.error("--workers > 1 is meaningless with the mock backend")
+    if not is_mock and args.require_monitor is None:
+        # No unmonitored runs on real hardware: refused before any file or load.
+        print("refused: --require-monitor SECONDS is mandatory on real hardware; launch "
+              "with tools/launch_exp1.sh, which starts and verifies the watchdog.")
+        return 2
     print(f"[exp1] backend={b.name} workers={args.workers}")
+    guard, check = None, None
+    if args.require_monitor is not None:
+        root = args.outdir.rstrip("/") or args.outdir
+        run_id = os.path.basename(root)
+        try:
+            os.makedirs(root)              # fresh directory only: never overwrite a run
+        except FileExistsError:
+            print(f"refused: {root} exists; refusing to overwrite")
+            return 2
+        with open(os.path.join(root, "exp1.start.json"), "w") as f:
+            json.dump({"pid": os.getpid(), "run_id": run_id, "argv": sys.argv,
+                       "written": time.strftime("%Y-%m-%d %H:%M:%S"),
+                       "sha256": {m: _sha256_file(os.path.join(os.path.dirname(
+                           os.path.abspath(__file__)), m)) for m in EXP1_HASHED}}, f, indent=1)
     signal.signal(signal.SIGTERM, _sigterm)
+    if args.require_monitor is not None:
+        guard = Exp1Guard(root, run_id)
+        print(f"[exp1] run {run_id}: waiting up to {args.require_monitor:.0f} s for a "
+              f"verified watchdog (no load until then)", flush=True)
+        try:
+            why = guard.wait(args.require_monitor)
+        except KeyboardInterrupt as e:
+            return _save_early_stop(root, b, args, f"interrupted at the barrier ({e})", None, 130)
+        if why:
+            return _save_early_stop(root, b, args,
+                                    f"refused: monitoring not established ({why})", None, 2)
+        print(f"[exp1] monitoring verified: {guard.describe()}", flush=True)
+        check = guard.raise_if_lost
 
-    idle_stats = measure_idle_baseline(b, args.idle_window_s)
+    try:
+        idle_stats = measure_idle_baseline(b, args.idle_window_s, check=check)
+    except KeyboardInterrupt as e:
+        return _save_early_stop(args.outdir, b, args,
+                                f"interrupted before heating ({e or 'KeyboardInterrupt'})",
+                                guard, 130)
     if args.idle_baseline is not None:
         idle, idle_source = args.idle_baseline, "recorded (--idle-baseline)"
     else:
@@ -459,12 +567,19 @@ def main():
     pool = None
     if args.workers > 1:
         print(f"[exp1] starting {args.workers} HOT worker processes ...")
-        pool = HeatWorkers(args.workers, args.n, 200.0)
+        try:
+            pool = HeatWorkers(args.workers, args.n, 200.0)
+        except KeyboardInterrupt as e:   # HeatWorkers stopped its own workers
+            return _save_early_stop(args.outdir, b, args,
+                                    f"interrupted before heating ({e or 'KeyboardInterrupt'})",
+                                    guard, 130)
 
     # ---------------- 1a: heating step response ----------------
     print(f"[exp1] 1a heating: sustained load for {args.minutes} min ...")
     abort_reason = None
     worker_report = None
+    interrupted = None
+    t_start = snap_start = cpu_before = pcpu_before = None
     try:
         log.start()
         t_start = time.monotonic()
@@ -477,6 +592,8 @@ def main():
         heat_end = t_start + args.minutes * 60
         n_jobs = 0
         while time.monotonic() < heat_end:
+            if check is not None:
+                check()                   # watchdog lost -> MonitorLost (KeyboardInterrupt)
             if args.max_temp is not None:
                 cur = _latest_temp(log)
                 if cur is not None and cur >= args.max_temp:
@@ -493,6 +610,14 @@ def main():
             else:
                 hot.run_once()
                 n_jobs += 1
+    except KeyboardInterrupt as e:   # SIGTERM, Ctrl+C, or monitor_guard.MonitorLost
+        interrupted = f"interrupted ({e or 'KeyboardInterrupt'})"
+        abort_reason = abort_reason or interrupted
+        if t_start is None:
+            t_start = time.monotonic()
+        if cpu_before is None:
+            cpu_before, pcpu_before = _cpu_times(), time.process_time()
+        snap_start = snap_start or {}
     finally:
         if pool:   # always: normal end, safety stop, Ctrl+C, SIGTERM
             worker_report = pool.stop()
@@ -505,21 +630,37 @@ def main():
         print(f"[exp1] HEATING STOPPED EARLY: {abort_reason}")
 
     # ---------------- 1b: cooling / recovery -------------------
-    print(f"[exp1] 1b cooling: idle for up to {args.cool_minutes} min ...")
     if is_mock:
         b.set_power(0.0)
     t_cool_start = time.monotonic()
-    cool_end = t_cool_start + args.cool_minutes * 60
-    term = CoolingTerminator(idle, needed=args.cool_consecutive)
-    cool_end_reason = "cool_minutes_elapsed"
-    while time.monotonic() < cool_end:
-        time.sleep(0.5)
-        if term.update(b.read().get("temp_c")):
-            cool_end_reason = "baseline_reached"
-            print(f"  [exp1] {term.needed} consecutive readings within "
-                  f"{term.tol} C of idle baseline {idle} C; "
-                  "stopping cooling phase early")
-            break
+    if interrupted:
+        # Stopped from outside (watchdog, operator): no cooling phase, save and exit.
+        cool_end_reason = "skipped: run interrupted"
+    else:
+        print(f"[exp1] 1b cooling: idle for up to {args.cool_minutes} min ...")
+        cool_end = t_cool_start + args.cool_minutes * 60
+        term = CoolingTerminator(idle, needed=args.cool_consecutive)
+        cool_end_reason = "cool_minutes_elapsed"
+        try:
+            while time.monotonic() < cool_end:
+                if check is not None:
+                    check()
+                time.sleep(0.5)
+                if term.update(b.read().get("temp_c")):
+                    cool_end_reason = "baseline_reached"
+                    print(f"  [exp1] {term.needed} consecutive readings within "
+                          f"{term.tol} C of idle baseline {idle} C; "
+                          "stopping cooling phase early")
+                    break
+        except KeyboardInterrupt as e:
+            # Conservative: an interrupted run is ABORTED (INCONCLUSIVE for G1)
+            # even when only the cooling phase was cut short.
+            interrupted = f"interrupted during cooling ({e or 'KeyboardInterrupt'})"
+            abort_reason = abort_reason or interrupted
+            cool_end_reason = interrupted
+    # A second signal must not stop the analysis and the metadata write.
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     cool_wall = time.monotonic() - t_cool_start
     tele = log.stop()
 
@@ -572,6 +713,9 @@ def main():
         "heat_snapshot_start": snap_start,
         "heat_snapshot_end": snap_end,
         "heat_summary": _heat_summary(tele, t_start, t_heat_done),
+        "interrupted": interrupted,
+        "monitor": guard.describe() if guard is not None else None,
+        "unstopped_workers": list(pool.unstopped) if pool else [],
     }
     outcome, outcome_lines = exp1_outcome(meta)
     meta["exp1_outcome"] = outcome
@@ -627,8 +771,12 @@ def main():
     for line in outcome_lines:
         print(line)
     print("=" * 62)
+    if meta["unstopped_workers"]:
+        print(f"INTERVENTION REQUIRED: worker pid(s) {meta['unstopped_workers']} still "
+              "alive after one SIGTERM; no SIGKILL was sent")
     print(f"\nwrote {args.outdir}/exp1.*")
+    return 130 if interrupted else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

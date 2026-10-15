@@ -258,5 +258,168 @@ class EndToEndOnMockBackend(unittest.TestCase):
         self.assertEqual(meta["idle_temp_c"], meta["idle_window"]["baseline_c"])
 
 
+def _ignore_term_worker():
+    """Test double for HeatWorkers: ignores SIGTERM and never sees the stop event."""
+    import signal as _s
+    import time as _t
+    _s.signal(_s.SIGTERM, _s.SIG_IGN)
+    while True:
+        _t.sleep(0.2)
+
+
+class HeatWorkersNeverSigkill(unittest.TestCase):
+
+    def test_term_ignoring_worker_is_reported_not_killed(self):
+        import multiprocessing as mp
+        import signal
+        hw = e1.HeatWorkers.__new__(e1.HeatWorkers)
+        ctx = mp.get_context("spawn")
+        hw.go, hw.stop_evt, hw.q = ctx.Event(), ctx.Event(), ctx.Queue()
+        hw.procs = [ctx.Process(target=_ignore_term_worker, daemon=True)]
+        hw.reports, hw.forced, hw._stopped, hw.unstopped = {}, [], False, []
+        hw.procs[0].start()
+        try:
+            report = hw.stop(timeout_s=0.5)
+            self.assertTrue(hw.procs[0].is_alive())         # no SIGKILL was sent
+            self.assertEqual(hw.unstopped, [hw.procs[0].pid])
+            self.assertTrue(report[0]["unstopped"] and report[0]["forced_stop"])
+        finally:                                            # test cleanup of the double only
+            os.kill(hw.procs[0].pid, signal.SIGKILL)
+            hw.procs[0].join(3)
+
+
+class FakeGuard:
+    """Stands in for Exp1Guard (software only). `lost_after`: raise MonitorLost on
+    that raise_if_lost() call."""
+    why, lost_after, made = None, None, []
+
+    def __init__(self, root, run_id, **kw):
+        self.root, self.run_id, self.calls = root, run_id, 0
+        FakeGuard.made.append(self)
+
+    def wait(self, timeout_s):
+        return FakeGuard.why
+
+    def raise_if_lost(self):
+        self.calls += 1
+        if FakeGuard.lost_after is not None and self.calls >= FakeGuard.lost_after:
+            raise e1.mg.MonitorLost("watchdog lost: test")
+
+    def describe(self):
+        return {"fake_guard": True}
+
+
+class FakeHardware:
+    name = "fakehw"
+
+    def __init__(self):
+        self.reads = 0
+
+    def read(self):
+        self.reads += 1
+        return {"t_wall": 0.0, "temp_c": 45.0, "freq_mhz": 1800.0, "throttled": 0}
+
+
+class SupervisedRun(unittest.TestCase):
+    """--require-monitor: mandatory on real hardware, fresh outdir, barrier before
+    any load, and an interrupted run still writes exp1.meta.json (ABORTED)."""
+
+    def setUp(self):
+        FakeGuard.why, FakeGuard.lost_after, FakeGuard.made = None, None, []
+        self.base = tempfile.mkdtemp(prefix="exp1_sup_")
+
+    def call(self, argv, backend=None):
+        buf = io.StringIO()
+        patches = [mock.patch.object(sys, "argv", ["exp1_thermal.py", *argv]),
+                   mock.patch.object(e1, "Exp1Guard", FakeGuard),
+                   mock.patch.object(e1, "HeatWorkers",
+                                     mock.Mock(side_effect=AssertionError("no load may start")))]
+        if backend is not None:
+            patches.append(mock.patch.object(e1.sensors, "get_backend", return_value=backend))
+        with contextlib.ExitStack() as st:
+            for p in patches:
+                st.enter_context(p)
+            st.enter_context(contextlib.redirect_stdout(buf))
+            rc = e1.main()
+        return rc, buf.getvalue()
+
+    def test_real_hardware_without_require_monitor_is_refused(self):
+        hw, out = FakeHardware(), os.path.join(self.base, "r1")
+        rc, text = self.call(["--workers", "4", "--outdir", out], backend=hw)
+        self.assertEqual(rc, 2)
+        self.assertIn("--require-monitor SECONDS is mandatory", text)
+        self.assertFalse(os.path.exists(out))
+        self.assertEqual((hw.reads, FakeGuard.made), (0, []))
+
+    def test_barrier_refusal_writes_aborted_meta_and_starts_nothing(self):
+        FakeGuard.why = "no verified watchdog within 1 s: MONITOR_OK not written"
+        hw, out = FakeHardware(), os.path.join(self.base, "r2")
+        rc, _ = self.call(["--workers", "4", "--outdir", out, "--require-monitor", "1"],
+                          backend=hw)
+        self.assertEqual(rc, 2)
+        with open(os.path.join(out, "exp1.meta.json")) as f:
+            meta = json.load(f)
+        self.assertEqual(meta["p4_status"], "ABORTED")
+        self.assertIn("refused: monitoring not established", meta["abort_reason"])
+        self.assertEqual(hw.reads, 0)                        # no idle window, no load
+        self.assertTrue(os.path.exists(os.path.join(out, "exp1.start.json")))
+        self.assertEqual(e1.analyze.classify_g1(meta, None)[0], "INCONCLUSIVE")
+
+    def test_existing_outdir_is_refused_and_untouched(self):
+        out = os.path.join(self.base, "r3")
+        os.makedirs(out)
+        with open(os.path.join(out, "keep.txt"), "w") as f:
+            f.write("precious")
+        rc, text = self.call(["--workers", "4", "--outdir", out, "--require-monitor", "1"],
+                             backend=FakeHardware())
+        self.assertEqual(rc, 2)
+        self.assertIn("refusing to overwrite", text)
+        self.assertEqual(os.listdir(out), ["keep.txt"])
+
+    def test_watchdog_lost_during_heating_saves_aborted_meta(self):
+        # mock backend (simulated, no CPU load) under the barrier; the fake guard
+        # reports the watchdog lost after a few checks inside the heating loop
+        FakeGuard.lost_after = 20
+        out = os.path.join(self.base, "r4")
+        rc, text = self.call(["--backend", "mock", "--minutes", "0.5", "--cool-minutes", "0.05",
+                              "--idle-window-s", "0.5", "--outdir", out,
+                              "--require-monitor", "1"])
+        self.assertEqual(rc, 130)
+        with open(os.path.join(out, "exp1.meta.json")) as f:
+            meta = json.load(f)
+        self.assertEqual(meta["p4_status"], "ABORTED")
+        self.assertIn("watchdog lost", meta["abort_reason"])
+        self.assertEqual(meta["cool_end_reason"], "skipped: run interrupted")
+        self.assertEqual(meta["monitor"], {"fake_guard": True})
+        self.assertEqual(e1.analyze.classify_g1(meta, None)[0], "INCONCLUSIVE")
+        self.assertTrue(os.path.exists(os.path.join(out, "exp1.telemetry.jsonl")))
+
+
+class Exp1GuardIdentity(unittest.TestCase):
+    """Exp1Guard accepts only tools/exp1_monitor.sh for this pid and outdir."""
+
+    def problem(self, argv, exe="/usr/bin/bash", start=7):
+        g = e1.Exp1Guard("results/exp1-x", "exp1-x", pid=123)
+        with mock.patch.object(e1.mg, "proc_start", return_value=start), \
+             mock.patch.object(e1.mg, "proc_argv", return_value=argv), \
+             mock.patch.object(e1.mg, "proc_exe", return_value=exe):
+            return g._watchdog_problem(99, 7, check_exe=True)
+
+    def test_right_watchdog_accepted(self):
+        self.assertIsNone(self.problem(["bash", "tools/exp1_monitor.sh", "123", "results/exp1-x"]))
+
+    def test_validation_watchdog_refused(self):
+        self.assertIn("does not match",
+                      self.problem(["bash", "tools/validation_monitor.sh", "123", "results/exp1-x"]))
+
+    def test_wrong_pid_outdir_exe_or_start_refused(self):
+        self.assertIsNotNone(self.problem(["bash", "tools/exp1_monitor.sh", "124", "results/exp1-x"]))
+        self.assertIsNotNone(self.problem(["bash", "tools/exp1_monitor.sh", "123", "results/other"]))
+        self.assertIn("is not bash", self.problem(["bash", "tools/exp1_monitor.sh", "123",
+                                                   "results/exp1-x"], exe="/usr/bin/python3.13"))
+        self.assertIn("start time", self.problem(["bash", "tools/exp1_monitor.sh", "123",
+                                                  "results/exp1-x"], start=8))
+
+
 if __name__ == "__main__":
     unittest.main()
