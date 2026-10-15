@@ -1,8 +1,10 @@
 # Workload validation code, launch plan rev3 (run wv-20261015-01)
 
 State: the code is committed in `a7641f0` (`a7641f0dcfa3ff06ee9fc4fdcb0a3b9aa3c7348f`) on branch `launch-plan-rev3`, pushed to
-`origin/launch-plan-rev3`; `main` is still at `c3bd4a9`. **Not deployed to the Pi and not run**: no real
-validation run has taken place. The preregistration addendum is a DRAFT for review (not formally approved).
+`origin/launch-plan-rev3`; `main` is still at `c3bd4a9`. Installed on the Pi on 2026-10-15 (all hashes below
+verified there) and used for the workload validation run `wv-20261015-01` on 2026-10-16: see
+`WORKLOAD_VALIDATION_RUN_wv-20261015-01.md`. The preregistration addendum is a DRAFT for review (not
+formally approved).
 Deploying needs separate approval and a sha256 check of every copied file against the first column;
 `tools/launch_validation.sh` (EXPECTED_HASHES) refuses any other content.
 

@@ -1,8 +1,9 @@
 # Operational addendum to PREREG_workload_validation.md (launch plan wv-20261015-01, rev3)
 
 Status: DRAFT for review (not formally approved). The implementation it describes is committed in
-`a7641f0` on branch `launch-plan-rev3` (pushed); it is NOT deployed to the Pi and no validation run has
-taken place.
+`a7641f0` on branch `launch-plan-rev3` (pushed). It was installed on the Pi on 2026-10-15 and used for
+run `wv-20261015-01` on 2026-10-16 while this addendum was still a DRAFT
+(`provenance/WORKLOAD_VALIDATION_RUN_wv-20261015-01.md`).
 
 `PREREG_workload_validation.md` itself is **unchanged** (sha256 `05ab24e5ea4c8bad9e356990328a9b1b4529c1f40d95b08f73471b0d28ece864`),
 and so is the `PREREG` constants dict in `validate_workload.py` (diff-checked against the repository original).
