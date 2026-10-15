@@ -1,13 +1,15 @@
 # Operational addendum to PREREG_workload_validation.md (launch plan wv-20261015-01, rev3)
 
-Status: DRAFT for review (not formally approved). On branch `launch-plan-rev3`, with uncommitted
-integration changes; NOT deployed to the Pi.
+Status: DRAFT for review (not formally approved). The implementation it describes is committed in
+`a7641f0` on branch `launch-plan-rev3` (pushed); it is NOT deployed to the Pi and no validation run has
+taken place.
 
 `PREREG_workload_validation.md` itself is **unchanged** (sha256 `05ab24e5ea4c8bad9e356990328a9b1b4529c1f40d95b08f73471b0d28ece864`),
 and so is the `PREREG` constants dict in `validate_workload.py` (diff-checked against the repository original).
 No threshold, sample size, rerun limit, criterion or statistic changes. This addendum records only
-how the run is launched, supervised and stopped, and two code corrections. Each item below can be
-traced to a file and a test in this folder.
+how the run is launched, supervised and stopped, and the code corrections in section 3. Each item below
+can be traced to a file in this repository and to the local tests listed in
+`provenance/WORKLOAD_VALIDATION_rev3.md`.
 
 ## 1. Launch and supervision (operational, not a pre-registered threshold)
 - The validator is started only by `tools/launch_validation.sh`, with `--require-monitor 120`.
@@ -28,6 +30,10 @@ traced to a file and a test in this folder.
   alive after its one SIGTERM is reported as INTERVENTION REQUIRED and left for a person.
 
 ## 2. Idle screening before launch (preflight, read-only)
+This rule is an operational decision recorded on 2026-10-15. It is **not** a threshold of
+`PREREG_workload_validation.md`, whose only idle-related rules are the 30 s idle baseline at the start
+of a run and the 2 °C block-start margin. It is implemented in `tools/launch_validation.sh` (Phase 1) and, unchanged, in
+`tools/idle_observation.sh`.
 Samples every 30 s; evaluated at 15, 20, 25 and 30 min on the last 21 samples (10 min):
 |mean(samples 12–21) − mean(samples 2–11)| ≤ 0.5 °C **and** |least-squares slope over the 21 samples,
 x = actual timestamps| ≤ 0.05 °C/min. Launch proceeds at the first passing checkpoint; NOT STABLE at
