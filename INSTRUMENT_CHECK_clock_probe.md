@@ -42,3 +42,8 @@ verdict VALID_NO_KNEE); this check reinterprets nothing.
 - NO_CLOCK_DROP: the frequency-based result stands: no knee in the clock under this load,
   G1 FAIL by the preregistered rule.
 - INCONCLUSIVE / MIXED: report and decide; no verdict.
+
+## Result (added 2026-10-16 after the run; the text above is unchanged)
+Run `clockprobe-20261016-01`: **BLIND_SPOT** (ARM clock below 98 % of max in 33 of 128 active samples,
+minimum 1629 MHz; `scaling_cur_freq` 1800 MHz in every sample). The amendment above is now required
+before any new Experiment 1 run. Record: `provenance/INSTRUMENT_CHECK_RUN_clockprobe-20261016-01.md`.
