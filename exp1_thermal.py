@@ -24,6 +24,12 @@ workers get a stop request and at most one SIGTERM each (never SIGKILL), and
 exp1.meta.json is still written, marked ABORTED (INCONCLUSIVE for G1). The
 mock backend may run without the barrier (pipeline checks only).
 
+Amendment A3: on the Raspberry Pi the knee is found in the firmware ARM clock
+(vcgencmd measure_clock arm, telemetry field arm_clock_mhz), not in
+scaling_cur_freq, which does not show firmware throttling on the Pi 4. The
+rule is unchanged (below 98 % of the run's maximum). The scaling_cur_freq knee
+is still recorded as knee_sysfs, descriptive only.
+
 Outputs: results/exp1.{meta.json,telemetry.jsonl} (+ exp1.start.json with --require-monitor)
 """
 
@@ -110,6 +116,25 @@ def find_knee(temps, freqs):
     return {"knee_c": knee, "f_max": f_max, "f_min": f_min,
             "depth": 1.0 - f_min / f_max,
             "throttled_samples": int(below.sum())}
+
+
+def knee_from_telemetry(tele, clock):
+    """Knee in the telemetry field `clock` (analyze.knee_clock), plus the count
+    of samples with a temperature but no clock reading (Amendment A3).
+    Returns (knee, knee_sysfs): knee_sysfs is the scaling_cur_freq knee,
+    recorded for comparison only, and None when clock is freq_mhz itself."""
+    s = [x for x in tele if x.get("temp_c") is not None]
+    T = [x["temp_c"] for x in s]
+
+    def series(field):
+        return [np.nan if x.get(field) is None else x[field] for x in s]
+
+    knee = find_knee(T, series(clock))
+    if knee is not None:
+        knee.update(clock_source=clock, clock_samples=len(s),
+                    clock_missing=sum(1 for x in s if x.get(clock) is None))
+    knee_sysfs = find_knee(T, series("freq_mhz")) if clock != "freq_mhz" else None
+    return knee, knee_sysfs
 
 
 # --------------------------------------------------------------------------
@@ -317,6 +342,7 @@ def _heat_summary(samples, t0, t1):
     if not s:
         return None
     fr = [x["freq_mhz"] for x in s if x.get("freq_mhz") is not None]
+    arm = [x["arm_clock_mhz"] for x in s if x.get("arm_clock_mhz") is not None]
     th = [x["throttled"] for x in s if x.get("throttled") is not None]
     th_or = 0
     for v in th:
@@ -326,6 +352,8 @@ def _heat_summary(samples, t0, t1):
             "temp_max_c": max(x["temp_c"] for x in s),
             "freq_min_mhz": min(fr) if fr else None,
             "freq_max_mhz": max(fr) if fr else None,
+            "arm_clock_min_mhz": min(arm) if arm else None,
+            "arm_clock_max_mhz": max(arm) if arm else None,
             "throttled_or": hex(th_or) if th else None,
             "throttled_nonzero_samples": sum(1 for v in th if v)}
 
@@ -511,7 +539,10 @@ def main():
         print("refused: --require-monitor SECONDS is mandatory on real hardware; launch "
               "with tools/launch_exp1.sh, which starts and verifies the watchdog.")
         return 2
-    print(f"[exp1] backend={b.name} workers={args.workers}")
+    clock = analyze.knee_clock(b.name)
+    if clock == "arm_clock_mhz":
+        b.record_arm_clock = True          # Amendment A3: sample the firmware clock
+    print(f"[exp1] backend={b.name} workers={args.workers} knee clock={clock}")
     guard, check = None, None
     if args.require_monitor is not None:
         root = args.outdir.rstrip("/") or args.outdir
@@ -667,8 +698,6 @@ def main():
     # ---------------- analysis ----------------
     t = [s["t_wall"] for s in tele if s.get("temp_c") is not None]
     T = [s["temp_c"] for s in tele if s.get("temp_c") is not None]
-    F = [s.get("freq_mhz") for s in tele if s.get("temp_c") is not None]
-    F = [np.nan if f is None else f for f in F]
 
     heat_idx = [i for i, tt in enumerate(t) if tt <= t_heat_done]
     cool_idx = [i for i, tt in enumerate(t) if tt > t_heat_done]
@@ -679,7 +708,7 @@ def main():
     fit_c = fit_exponential([t[i] for i in cool_idx],
                             [T[i] for i in cool_idx], cooling=True) \
         if len(cool_idx) > 10 else None
-    knee = find_knee(T, F)
+    knee, knee_sysfs = knee_from_telemetry(tele, clock)
     util = _cpu_util(cpu_before, cpu_after)
     status, _ = p4_verdict(knee, abort_reason, util, is_mock)
 
@@ -701,6 +730,7 @@ def main():
         "fit_heating": fit_h,
         "fit_cooling": fit_c,
         "knee": knee,
+        "knee_sysfs": knee_sysfs,      # A3: scaling_cur_freq knee, descriptive only
         # --- load characterization (added with --workers) ---
         "workers": args.workers,
         "max_temp_c": args.max_temp,
@@ -743,12 +773,19 @@ def main():
                   "thermal system.")
             print("        If confirmed, a history term carries information "
                   "beyond instantaneous T.")
+    print(f"knee clock         : {clock}"
+          + (f" ({knee['clock_missing']} of {knee['clock_samples']} samples unreadable)"
+             if knee else " (no readings)"))
     if knee and knee.get("knee_c") is not None:
         print(f"throttle knee      : {knee['knee_c']:.1f} C")
         print(f"throttle depth     : {knee['depth']*100:.1f}% "
               f"(f {knee['f_max']:.0f} -> {knee['f_min']:.0f} MHz)")
     else:
         print("throttle knee      : NOT OBSERVED")
+    if knee_sysfs is not None:
+        print("scaling_cur_freq   : "
+              + (f"drop from {knee_sysfs['knee_c']:.1f} C" if knee_sysfs.get("knee_c")
+                 is not None else "no drop") + " (descriptive only, A3)")
 
     print(f"cooling ended      : {cool_end_reason} after {cool_wall:.0f} s")
 

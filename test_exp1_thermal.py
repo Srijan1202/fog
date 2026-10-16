@@ -166,6 +166,57 @@ class EndOfRunMessageFollowsAnalyzeRule(unittest.TestCase):
         self.assertNotIn(PROCEED, _text(lines))
 
 
+def _tele(temps, freqs, arms):
+    return [{"t_wall": float(i), "temp_c": t, "freq_mhz": f, "throttled": 0,
+             "arm_clock_mhz": a} for i, (t, f, a) in enumerate(zip(temps, freqs, arms))]
+
+
+class KneeFromArmClockAmendmentA3(unittest.TestCase):
+    """On the Pi the knee comes from the firmware ARM clock; scaling_cur_freq is
+    recorded beside it, descriptive only."""
+
+    # Shape of clockprobe-20261016-01: scaling_cur_freq flat, firmware clock dips.
+    T = [70.0, 75.0, 80.0, 81.5, 82.8, 83.2, 83.0, 82.5]
+    F = [1800.0] * 8
+    A = [1800.457, 1800.404, 1800.457, 1800.457, 1775.0, 1677.0, 1726.0, 1800.457]
+
+    def test_knee_found_in_arm_clock_while_sysfs_is_flat(self):
+        knee, sysfs = e1.knee_from_telemetry(_tele(self.T, self.F, self.A), "arm_clock_mhz")
+        self.assertEqual(knee["knee_c"], 83.0)            # 1726 and 1677 < 0.98 * max
+        self.assertEqual(knee["throttled_samples"], 2)    # 1775 (-1.4 %) is not a drop
+        self.assertAlmostEqual(knee["f_min"], 1677.0)
+        self.assertEqual((knee["clock_source"], knee["clock_samples"],
+                          knee["clock_missing"]), ("arm_clock_mhz", 8, 0))
+        self.assertIsNone(sysfs["knee_c"])
+
+    def test_missing_readings_are_counted_not_invented(self):
+        A = list(self.A)
+        A[0] = A[5] = None
+        tele = _tele(self.T, self.F, A) + [{"t_wall": 9.0, "temp_c": None,
+                                            "freq_mhz": 1800.0, "arm_clock_mhz": None}]
+        knee, _ = e1.knee_from_telemetry(tele, "arm_clock_mhz")
+        self.assertEqual((knee["clock_samples"], knee["clock_missing"]), (8, 2))
+        self.assertEqual(knee["knee_c"], 83.0)            # 1726 still counts
+
+    def test_no_arm_readings_gives_no_knee_record(self):
+        knee, sysfs = e1.knee_from_telemetry(_tele(self.T, self.F, [None] * 8),
+                                             "arm_clock_mhz")
+        self.assertIsNone(knee)
+        self.assertEqual(sysfs["f_max"], 1800.0)
+
+    def test_freq_mhz_backends_keep_the_original_knee(self):
+        F = [1800.0] * 5 + [1500.0] * 3
+        knee, sysfs = e1.knee_from_telemetry(_tele(self.T, F, [None] * 8), "freq_mhz")
+        self.assertEqual((knee["knee_c"], knee["clock_source"]), (82.5, "freq_mhz"))
+        self.assertIsNone(sysfs)
+        self.assertEqual(e1.find_knee(self.T, F)["knee_c"], knee["knee_c"])
+
+    def test_a3_record_classifies_by_the_arm_clock(self):
+        knee, _ = e1.knee_from_telemetry(_tele(self.T, self.F, self.A), "arm_clock_mhz")
+        m = run_meta(backend="raspberrypi", knee=knee)
+        self.assertEqual(e1.analyze.classify_g1(m, None)[:2], ("PASS", 83.0))
+
+
 class CoolingNeedsConsecutiveReadings(unittest.TestCase):
     BASE = 48.6
 
@@ -364,6 +415,19 @@ class SupervisedRun(unittest.TestCase):
         self.assertEqual(hw.reads, 0)                        # no idle window, no load
         self.assertTrue(os.path.exists(os.path.join(out, "exp1.start.json")))
         self.assertEqual(e1.analyze.classify_g1(meta, None)[0], "INCONCLUSIVE")
+
+    def test_pi_backend_records_the_arm_clock_a3(self):
+        FakeGuard.why = "no verified watchdog within 1 s: MONITOR_OK not written"
+        for name, on in (("raspberrypi", True), ("fakehw", False)):
+            with self.subTest(backend=name):
+                hw = FakeHardware()
+                hw.name, hw.record_arm_clock = name, False
+                rc, text = self.call(["--workers", "4", "--outdir",
+                                      os.path.join(self.base, f"a3-{name}"),
+                                      "--require-monitor", "1"], backend=hw)
+                self.assertEqual(rc, 2)
+                self.assertEqual(hw.record_arm_clock, on)
+                self.assertIn("knee clock=" + ("arm_clock_mhz" if on else "freq_mhz"), text)
 
     def test_existing_outdir_is_refused_and_untouched(self):
         out = os.path.join(self.base, "r3")

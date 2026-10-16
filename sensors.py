@@ -12,6 +12,12 @@ Fields (None where unsupported on this platform):
     throttled   int     platform throttle bitfield/flag (0 = not throttled)
     energy_uj   int     cumulative energy counter, microjoules (for deltas)
 
+Raspberry Pi only, and only when the caller sets record_arm_clock = True
+(Experiment 1, Amendment A3):
+    arm_clock_mhz float firmware ARM clock (vcgencmd measure_clock arm), MHz.
+                        On the Pi 4, scaling_cur_freq (freq_mhz) does not show
+                        firmware throttling; this field does.
+
 IMPORTANT: energy_uj is a *cumulative* counter that wraps. Always use
 successive differences and handle wraparound.
 """
@@ -50,10 +56,13 @@ class RaspberryPiBackend(SensorBackend):
         self.vcgencmd = shutil.which("vcgencmd")
         self.thermal = "/sys/class/thermal/thermal_zone0/temp"
         self.freq = "/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq"
+        # Off by default, so other experiments keep their validated sampling cost.
+        self.record_arm_clock = False
         self.caps = {
             "temp": True,
             "freq": os.path.exists(self.freq),
             "throttle_flags": self.vcgencmd is not None,
+            "arm_clock": self.vcgencmd is not None,
             "energy": False,
         }
 
@@ -68,14 +77,14 @@ class RaspberryPiBackend(SensorBackend):
         except Exception:
             return False
 
-    def _throttle(self):
+    def _vcgencmd(self, *args):
         if not self.vcgencmd:
             return None
         # Not subprocess.run(timeout=...): on timeout that SIGKILLs the child. Here a
         # hung vcgencmd gets ONE SIGTERM and the reading counts as unreadable (None);
         # it is never SIGKILLed.
         try:
-            p = subprocess.Popen([self.vcgencmd, "get_throttled"], stdout=subprocess.PIPE,
+            p = subprocess.Popen([self.vcgencmd, *args], stdout=subprocess.PIPE,
                                  stderr=subprocess.DEVNULL, text=True)
         except Exception:
             return None
@@ -88,11 +97,24 @@ class RaspberryPiBackend(SensorBackend):
             except subprocess.TimeoutExpired:
                 pass
             return None
+        return out
+
+    def _throttle(self):
+        out = self._vcgencmd("get_throttled")
         try:
             # format: throttled=0x50005
             return int(out.strip().split("=")[1], 16)
         except Exception:
             return None
+
+    def _arm_clock(self):
+        out = self._vcgencmd("measure_clock", "arm")
+        try:
+            # format: frequency(48)=1800457088 (Hz); 0 or garbage = unreadable
+            hz = int(out.strip().split("=")[1])
+        except Exception:
+            return None
+        return hz / 1e6 if hz > 0 else None
 
     def read(self) -> dict:
         temp = freq = None
@@ -106,13 +128,16 @@ class RaspberryPiBackend(SensorBackend):
                 freq = int(f.read().strip()) / 1000.0
         except Exception:
             pass
-        return {
+        r = {
             "t_wall": time.monotonic(),
             "temp_c": temp,
             "freq_mhz": freq,
             "throttled": self._throttle(),
             "energy_uj": None,
         }
+        if self.record_arm_clock:
+            r["arm_clock_mhz"] = self._arm_clock()
+        return r
 
 
 # --------------------------------------------------------------------------

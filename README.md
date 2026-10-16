@@ -19,7 +19,8 @@ probe.py
        ▼
 exp1_thermal.py    → tau_heat, tau_cool, knee, throttle depth
   └─ no knee reached under sustained load ──────────────────► KILL (P4)
-     (only a completed, valid full-load run - see Amendment A1)
+     (only a completed, valid full-load run - see Amendment A1;
+      on the Pi the knee is read from the firmware ARM clock - A3)
   └─ tau/horizon far from 1 for all feasible k ─────────────► KILL (P3)
        │
        ▼
@@ -99,7 +100,8 @@ differences:
 - Any stop (85 °C, under-voltage, read failures, cap, a lost watchdog, an operator
   SIGTERM) still writes `exp1.meta.json`, marked ABORTED, which is INCONCLUSIVE for G1. Only
   a complete, unstopped four-core run can establish the throttle knee that
-  Experiment 3 needs (Amendment A1).
+  Experiment 3 needs (Amendment A1), and on the Pi only from the firmware ARM
+  clock (Amendment A3).
 
 ### Launching the workload validation
 
@@ -261,6 +263,10 @@ temp_after_c, freq_mhz, throttled, rep, mode, run_index
 ```
 t_wall, temp_c, freq_mhz, throttled, energy_uj, run_index, mode
 ```
+Experiment 1 on the Pi also records `arm_clock_mhz` (firmware ARM clock,
+Amendment A3); its `exp1.meta.json` has `knee` (from that clock, with
+`clock_source`, `clock_samples`, `clock_missing`) and `knee_sysfs`
+(from `freq_mhz`, descriptive only).
 
 `exp*.meta.json` — fits, knee, per-run summaries:
 ```
@@ -355,6 +361,37 @@ Fixed-work jobs and controlled planned work.
   refuses to run on real hardware unless the validation for its `--parallel` is
   ACCEPTED and was made with the current `workload.py`. It also still requires
   a valid Experiment 1 knee (A1). V3 (frequency caps) is excluded.
+
+### Amendment A3 (2026-10-16, before any Experiment 3 data and before the next Experiment 1 run)
+
+On the Pi, the throttle knee is read from the firmware ARM clock.
+
+- **Why.** The Exp 1 knee was defined as a drop in `freq_mhz`, which on the Pi
+  is Linux `scaling_cur_freq`. A pre-specified instrument check
+  (`INSTRUMENT_CHECK_clock_probe.md`, run `clockprobe-20261016-01`, record in
+  `provenance/`) found that on this Pi 4 the firmware lowers the ARM clock
+  (to 1629 MHz) while `scaling_cur_freq` keeps reading 1800 MHz. Verdict
+  BLIND_SPOT: `scaling_cur_freq` cannot show the knee.
+- **Measurement.** On the Raspberry Pi backend, Exp 1 records the firmware ARM
+  clock (`vcgencmd measure_clock arm`) in every telemetry sample as
+  `arm_clock_mhz`. A hung `vcgencmd` gets one SIGTERM, never SIGKILL, and the
+  reading counts as unreadable. Other experiments do not record it, so their
+  sampling stays as validated. `freq_mhz` keeps its meaning.
+- **Knee rule, unchanged except for the clock.** A sample is throttled when
+  `arm_clock_mhz` is below 98 % of its maximum over the run. The knee is the
+  lowest temperature among throttled samples, and depth is `1 − min/max`. The
+  `scaling_cur_freq` knee is still recorded (`knee_sysfs`) for comparison only.
+  Other backends keep `freq_mhz`.
+- **Validity, added to A1.** On the Pi, an Exp 1 counts for G1 only if its knee
+  was measured in `arm_clock_mhz` and the clock was unreadable in at most 5 %
+  of samples. Otherwise G1 is INCONCLUSIVE.
+- **Earlier runs.** Exp 1 runs made before A3 (`exp1_1core`, `exp1_4core`,
+  `exp1-4core-20261016-01`) keep their recorded outcomes. No record is edited.
+  They have no ARM clock record, so `analyze.py` treats them as INCONCLUSIVE
+  for G1, never as PASS or FAIL. G1 is decided by an A3 run.
+- **Not affected.** The workload-validation guard also stops on live throttle
+  flags, so it is not blind. Exp 2's knee stays supporting evidence only.
+  Exp 3's `time_throttled_s` stays descriptive, and no gate uses it.
 
 ---
 

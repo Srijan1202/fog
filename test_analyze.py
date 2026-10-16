@@ -38,9 +38,20 @@ E1_PARTIAL = {**E1_4CORE, "abort_reason": None, "workers": 1,
 # Same key set as the archived exp1_1core (original exp1_thermal.py).
 E1_1CORE_LEGACY = {"experiment": "exp1_thermal", "backend": "raspberrypi",
                    "mock": False, "knee": NO_KNEE, "idle_temp_c": 44.79}
-E1_VALID_FAIL = {**E1_4CORE, "abort_reason": None, "p4_status": "P4_FAIL"}
-E1_KNEE = {**E1_4CORE, "abort_reason": None, "knee": KNEE,
+# Amendment A3: a valid Pi knee record names the firmware ARM clock and its counts.
+CLK = {"clock_source": "arm_clock_mhz", "clock_samples": 4000, "clock_missing": 0}
+NO_KNEE_A3, KNEE_A3 = {**NO_KNEE, **CLK}, {**KNEE, **CLK}
+E1_VALID_FAIL = {**E1_4CORE, "abort_reason": None, "p4_status": "P4_FAIL",
+                 "knee": NO_KNEE_A3}
+E1_KNEE = {**E1_4CORE, "abort_reason": None, "knee": KNEE_A3,
            "p4_status": "NO_KILL"}
+# Field values of exp1-4core-20261016-01 (exp1_thermal.py 7968af5, before A3):
+# completed, full load, no knee in scaling_cur_freq, no ARM clock record.
+E1_PRE_A3 = {"experiment": "exp1_thermal", "backend": "raspberrypi", "mock": False,
+             "knee": NO_KNEE, "workers": 4, "abort_reason": None,
+             "p4_status": "P4_FAIL", "cpu_util_heating": FULL,
+             "heat_minutes": 15.0, "heat_wall_s": 900.7,
+             "heat_summary": {"throttled_or": "0x80008"}}
 E1_KNEE_THEN_STOPPED = {**E1_4CORE, "knee": KNEE, "p4_status": "SAFETY_STOPPED"}
 E1_KNEE_PARTIAL = {**E1_PARTIAL, "knee": KNEE, "p4_status": "NO_KILL"}
 E1_MOCK_FAIL = {"experiment": "exp1_thermal", "backend": "mock", "mock": True,
@@ -175,6 +186,75 @@ class G1Classification(unittest.TestCase):
 
     def test_mock_pipeline_check_behavior_is_preserved(self):
         self.assertEqual(an.classify_g1(E1_MOCK_FAIL, None)[0], "FAIL")
+
+
+class AmendmentA3ArmClock(unittest.TestCase):
+    """On the Pi, G1 counts only a knee measured in the firmware ARM clock."""
+
+    def test_knee_clock_per_backend(self):
+        self.assertEqual(an.knee_clock("raspberrypi"), "arm_clock_mhz")
+        for b in ("linux_cpu", "nvidia", "mock", "windows", None):
+            self.assertEqual(an.knee_clock(b), "freq_mhz")
+
+    def test_pre_a3_completed_no_knee_run_is_inconclusive_not_fail(self):
+        state, _, _, why = an.classify_g1(E1_PRE_A3, None)
+        self.assertEqual(state, "INCONCLUSIVE")
+        self.assertIn("Amendment A3", why)
+        self.assertIn("recorded outcome is unchanged", why)
+
+    def test_pre_a3_knee_never_passes(self):
+        m = {**E1_PRE_A3, "knee": KNEE, "p4_status": "NO_KILL"}
+        self.assertEqual(an.classify_g1(m, None)[0], "INCONCLUSIVE")
+
+    def test_knee_in_scaling_cur_freq_on_the_pi_is_inconclusive(self):
+        for knee in ({**KNEE, **CLK, "clock_source": "freq_mhz"},
+                     {**NO_KNEE, **CLK, "clock_source": "freq_mhz"}):
+            with self.subTest(knee=knee["knee_c"]):
+                m = {**E1_PRE_A3, "knee": knee}
+                self.assertEqual(an.classify_g1(m, None)[0], "INCONCLUSIVE")
+
+    def test_missing_clock_readings_limit_is_five_percent_inclusive(self):
+        for missing, state in ((200, "FAIL"), (201, "INCONCLUSIVE")):
+            with self.subTest(missing=missing):
+                m = {**E1_PRE_A3, "knee": {**NO_KNEE_A3, "clock_missing": missing}}
+                self.assertEqual(an.classify_g1(m, None)[0], state)
+        m = {**E1_PRE_A3, "knee": {**KNEE_A3, "clock_missing": 201}}
+        self.assertEqual(an.classify_g1(m, None)[0], "INCONCLUSIVE")
+
+    def test_missing_or_zero_sample_counts_are_inconclusive(self):
+        for over in ({"clock_samples": None}, {"clock_missing": None},
+                     {"clock_samples": 0}, {"clock_samples": "4000"}):
+            with self.subTest(over=over):
+                m = {**E1_PRE_A3, "knee": {**NO_KNEE_A3, **over}}
+                self.assertEqual(an.classify_g1(m, None)[0], "INCONCLUSIVE")
+
+    def test_a3_runs_decide_g1(self):
+        self.assertEqual(an.classify_g1({**E1_PRE_A3, "knee": NO_KNEE_A3}, None)[0],
+                         "FAIL")
+        self.assertEqual(an.classify_g1({**E1_PRE_A3, "knee": KNEE_A3,
+                                         "p4_status": "NO_KILL"}, None)[:2],
+                         ("PASS", 80.2))
+
+    def test_other_safety_rules_still_come_first(self):
+        m = {**E1_PRE_A3, "abort_reason": "max_temp: 85.1 C >= 85.0 C",
+             "p4_status": "SAFETY_STOPPED"}
+        self.assertIn("SAFETY-STOPPED", an.classify_g1(m, None)[3])
+
+    def test_non_pi_and_mock_backends_are_unchanged(self):
+        linux = {**E1_PRE_A3, "backend": "linux_cpu", "knee": KNEE,
+                 "p4_status": "NO_KILL"}
+        self.assertEqual(an.classify_g1(linux, None)[0], "PASS")
+        self.assertEqual(an.classify_g1({**linux, "knee": NO_KNEE}, None)[0], "FAIL")
+        pi_mock = {**E1_MOCK_FAIL, "backend": "raspberrypi"}
+        self.assertEqual(an.classify_g1(pi_mock, None)[0], "FAIL")
+
+    def test_pre_a3_run_end_to_end_is_further_evidence_not_kill(self):
+        result, out = run(E1_PRE_A3)                     # exp1 only: no verdict yet
+        self.assertIsNone(result["verdict"])
+        self.assertIn("further evidence required", out)
+        self.assertNotIn("FAIL: no throttle knee", out)
+        result, _ = run(E1_PRE_A3, E2_FLAT, make_e3(False))
+        self.assertEqual(result["verdict"], "FURTHER_EVIDENCE")
 
 
 E2_KNEE = {**E2_PASS, "knee_c": 79.0}

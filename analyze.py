@@ -78,6 +78,17 @@ STRUCTURAL = ("G1_knee", "G2_sT", "G4_mediator")
 
 UNDERVOLT_BITS = 0x1 | 0x10000   # Pi get_throttled: under-voltage now / since boot
 
+# Amendment A3: the clock exp1's knee must be measured in, per backend. On the
+# Pi 4, scaling_cur_freq (freq_mhz) does not show firmware throttling
+# (instrument check clockprobe-20261016-01); the firmware ARM clock does.
+KNEE_CLOCK = {"raspberrypi": "arm_clock_mhz"}
+MAX_CLOCK_MISSING = 0.05         # A3: at most 5 % of samples without a clock reading
+
+
+def knee_clock(backend):
+    """Telemetry field exp1's knee is measured in for this backend."""
+    return KNEE_CLOCK.get(backend, "freq_mhz")
+
 
 def _num(x):
     return (isinstance(x, (int, float)) and not isinstance(x, bool)
@@ -128,6 +139,18 @@ def _exp1_invalid(e1, k1):
         return f"exp1 heating lasted {wall:.0f} s of the planned {minutes * 60:.0f} s"
     if _undervoltage(e1):
         return "under-voltage flagged during exp1 heating; run not valid"
+    need = KNEE_CLOCK.get(e1.get("backend"))
+    if need and not e1.get("mock"):                        # Amendment A3
+        if k1.get("clock_source") != need:
+            return (f"exp1 knee was not measured in {need} (run made before "
+                    "Amendment A3); its recorded outcome is unchanged, but G1 "
+                    "needs an Amendment A3 run")
+        n, miss = k1.get("clock_samples"), k1.get("clock_missing")
+        if not (_num(n) and _num(miss) and n > 0):
+            return f"exp1 knee record lacks {need} sample counts"
+        if miss / n > MAX_CLOCK_MISSING:
+            return (f"exp1 {need} unreadable in {miss} of {n} samples "
+                    f"(> {MAX_CLOCK_MISSING:.0%})")
     return None
 
 
@@ -139,7 +162,9 @@ def classify_g1(e1, e2):
       INCONCLUSIVE  Experiment 1 is not a completed, valid sustained-load test
                     (safety-stopped, aborted, partial or unrecorded load,
                     short heating, no frequency record, under-voltage,
-                    incomplete metadata), even if it recorded a knee; or a
+                    incomplete metadata; on the Pi, a knee not measured in the
+                    firmware ARM clock or with > 5 % of clock readings missing,
+                    Amendment A3), even if it recorded a knee; or a
                     knee record is incomplete; or a valid no-knee Experiment 1
                     is contradicted by an Experiment 2 knee.
       PASS          valid Experiment 1 with a complete knee record
