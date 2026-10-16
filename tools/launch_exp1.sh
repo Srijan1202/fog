@@ -21,8 +21,8 @@
 # monitoring not established; 5 token written but not acknowledged.
 {
 # BEGIN SITE CONFIG
-RUN=exp1-4core-20261016-01
-B0=354990cf-dfb4-4bfc-83c4-75f3f09b5937
+RUN=exp1-4core-a3-20261016-01
+B0=0c954871-d0f4-44b4-8771-4eba4f827600
 HOST_EXPECTED=pi
 PROJECT="$HOME/tdas-pilot"
 OUT=results
@@ -44,12 +44,12 @@ LAUNCH_PATH=/usr/sbin:/usr/bin:/sbin:/bin
 LAUNCH_LANG=en_GB.UTF-8
 ARCHIVES="results/exp1_1core results/exp1_4core"
 EXPECTED_HASHES='
-f163ad9fbc4c861ebce0e88de72fa27ae56a8b0ef114f2be11d9c9969483ca95 exp1_thermal.py
-a2525fed6cb4d15be8b31aa71d77ca12cd929a6f000b86f83e98bdf23a5bd6ae analyze.py
+6f067d2fe09c856794530057c7218e5694ea58388def2869aecb818047a6ca08 exp1_thermal.py
+b5cf90630212ec35490df8c55af40559a561e943ccccc037ee9e888b4561c18e analyze.py
 31b6d8f6955798a4395baeaa8733e8a13b16e600f12cfcd071e00354641ad152 workload.py
 acc4d28a6f422fb22c307da3574e26efb3129610e73616bb49f7b719f9f454e3 monitor_guard.py
 31665b5a42dce04b1d97dc66be2df7fc44cba97a7c72f285cad53beb2f59a285 runner.py
-3cdc62dfc784b18733e248c883a0eab763d903389f0e652f4e3478adf408a019 sensors.py
+d9df2f74772c9bd0ac0cc8204f59fb97088df3744dbc16048e6eb4e7ae52c9bc sensors.py
 3a43a123cb8f4504ebc27864675a2ae0c513643443fd57c6cbe507c92bd8b0c4 tools/exp1_monitor.sh
 33fc0af9684cf8723686ca7d4e0a35812e22f23b2557afc1a189ec233adeb90f results/exp1_1core/SHA256SUMS
 42d58faf87a17ee703ffbdc502807f366f39d3b2de00cb36f4bad6308a3106f7 results/exp1_1core/LABEL.txt
