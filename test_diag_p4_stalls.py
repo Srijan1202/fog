@@ -262,6 +262,7 @@ class MailboxModeA4(unittest.TestCase):
         self.assertTrue(m["complete"])
         self.assertEqual(m["mode"], "mailbox")
         self.assertGreaterEqual(m["clock_reads"], 8)                 # >= 1 per W block
+        self.assertEqual(m["clock_hz"], 1.0)                         # A4 default
         self.assertEqual((m["clock_misses"], m["clock_mhz_min"]), (0, 1800.0))
         with open(os.path.join(out, "stalls.jobs.jsonl")) as f:
             jobs = [json.loads(x) for x in f]

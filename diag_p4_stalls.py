@@ -378,6 +378,9 @@ def main(argv=None):
     ap.add_argument("--poll-s", type=float, default=2.0)
     ap.add_argument("--max-load-s", type=float, default=600.0)
     ap.add_argument("--hz", type=float, default=5.0)
+    ap.add_argument("--clock-hz", type=float, default=1.0,
+                    help="--mode mailbox: ARM-clock reads per second in W blocks (A4: 1 Hz; "
+                         "5 Hz added a small latency tail in diag-stalls-20261018-01)")
     ap.add_argument("--mode", choices=tuple(MODES), default="telemetry",
                     help="telemetry: F/N (between-job vcgencmd read or not); "
                          "watchdog: W/N (watchdog-like 5 s poller or not)")
@@ -432,7 +435,7 @@ def main(argv=None):
             log = runner.TelemetryLogger(vw.SysfsReader(b), hz=args.hz)
             log.start()
             if cond == "W" and args.mode == "mailbox":
-                reader = ClockReader(clock, args.hz).start()
+                reader = ClockReader(clock, args.clock_hz).start()
             elif cond == "W":
                 stop_f = os.path.join(args.outdir, f"poller{bi}.stop")
                 poll_log = os.path.join(args.outdir, f"poller{bi}.log")
@@ -527,6 +530,7 @@ def main(argv=None):
                                           if clock_samples else None),
             "pairs_per_block": args.pairs_per_block, "max_temp_c": args.max_temp,
             "cooldown_below_c": args.cooldown_below, "max_load_s": args.max_load_s,
+            "clock_hz": args.clock_hz if args.mode == "mailbox" else None,
             "load_s": round(load_s, 3), "stop_reason": stop_reason, "interrupted": interrupted,
             "complete": stop_reason is None and interrupted is None and len(blocks) == len(order),
             "unstopped_workers": unstopped, "blocks": blocks, "summary": summary,
