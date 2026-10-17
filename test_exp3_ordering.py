@@ -195,6 +195,45 @@ class WorkloadValidationGate(unittest.TestCase):
                 self.assertIsNone(info)
                 self.assertTrue(refusal)
 
+    @staticmethod
+    def p4b_report(gemms=4):
+        rep = make_report(P=4)
+        cfg = rep["configs"].pop("4")
+        cfg["frozen"].update(params_id="P4b-F1")
+        if gemms is not None:
+            cfg["frozen"]["gemms_per_unit"] = gemms
+        rep["configs"]["4b"] = cfg
+        return rep
+
+    def test_p4b_validation_supplies_four_gemm_jobs_and_its_telemetry_scheme(self):
+        info, refusal = e3.resolve_workload(write_report(self.p4b_report()), 4,
+                                            is_mock=False, config="4b")
+        self.assertIsNone(refusal)
+        self.assertEqual((info["config"], info["telemetry"]), ("4b", "sysfs"))
+        self.assertEqual((info["hot"].gemms_per_unit, info["cool"].gemms_per_unit), (4, 4))
+        self.assertIn("P4b", info["cold_latency_match"]["source"])
+
+    def test_p4b_mismatches_are_refusals(self):
+        cases = {
+            "4b with P=1": (self.p4b_report(), 1, "4b"),
+            "4b asked, only P=4 in report": (make_report(P=4), 4, "4b"),
+            "4b frozen without gemms": (self.p4b_report(gemms=None), 4, "4b"),
+            "four-GEMM params used as plain P=4": (
+                {**make_report(P=4), "configs": {"4": self.p4b_report()["configs"]["4b"]}},
+                4, None),
+            "unknown config": (self.p4b_report(), 4, "4c"),
+        }
+        for name, (rep, P, config) in cases.items():
+            with self.subTest(case=name):
+                info, refusal = e3.resolve_workload(write_report(rep), P, is_mock=False,
+                                                    config=config)
+                self.assertIsNone(info)
+                self.assertTrue(refusal)
+
+    def test_plain_configurations_report_full_telemetry(self):
+        info, _ = self.resolve(make_report())
+        self.assertEqual((info["config"], info["telemetry"]), ("4", "full"))
+
     def test_p1_accepted_but_run_incomplete_because_p4_incomplete_is_refused(self):
         rep = make_report(P=1)
         rep["configs"]["4"] = {"status": vw.INCOMPLETE,
@@ -238,6 +277,15 @@ class RealHardwareRunsWithFakes(unittest.TestCase):
                                write_report(make_report(status=vw.REJECTED)))
         self.assertEqual(rc, 2)
         self.assertIn("REJECTED", out)
+        self.assertEqual(FakePool.instances, [])
+
+    def test_p4b_is_refused_before_any_load_until_amendment_a4(self):
+        rep = WorkloadValidationGate.p4b_report()
+        rc, out = self.patched(outdir_with(E1_KNEE, None), "--parallel", "4",
+                               "--workload-config", "4b", "--reps", "1", "--k", "4",
+                               "--workload-validation", write_report(rep))
+        self.assertEqual(rc, 2)
+        self.assertIn("Amendment A4", out)
         self.assertEqual(FakePool.instances, [])
 
     def test_accepted_validation_and_valid_knee_run_fixed_work_jobs(self):

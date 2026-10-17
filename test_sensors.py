@@ -79,8 +79,14 @@ class ArmClock(unittest.TestCase):
         t0 = time.monotonic()
         self.assertIsNone(self.b._arm_clock())
         self.assertLess(time.monotonic() - t0, 4.5)
-        time.sleep(0.3)
-        with open(os.path.join(self.d, "signals")) as f:
+        # dash runs the TERM trap only after its current `sleep 0.1`; on a busy
+        # machine that can take longer than the 1 s grace, so wait for the marker.
+        p = os.path.join(self.d, "signals")
+        end = time.monotonic() + 5.0
+        while not os.path.exists(p) and time.monotonic() < end:
+            time.sleep(0.05)
+        time.sleep(0.3)                       # a second signal would add a line
+        with open(p) as f:
             self.assertEqual(f.read().split(), ["term"])
 
 

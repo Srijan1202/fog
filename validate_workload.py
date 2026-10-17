@@ -5,6 +5,12 @@ workload: V0 (unit + overhead), V1 (P=1), V2 (P=4), V4 (telemetry, descriptive).
 V3 (frequency caps) is excluded. Pre-registration: PREREG_workload_validation.md.
 
     python3 validate_workload.py --plan                  # print the plan; no load
+    python3 validate_workload.py --plan --config 4b      # P4b plan; no load
+
+--config 4b runs only V0b', V0c' and configuration P4b
+(PREREG_workload_validation_ADDENDUM_P4b.md): P=4, one timed unit = 4 GEMMs,
+sysfs-only telemetry during jobs and throttle flags read between jobs, judged
+on the unchanged P=4 criteria. The default (all) is the original validation.
 
 A run is started ONLY by tools/launch_validation.sh (explicit approval; see
 README "Launching the workload validation"). It runs the validator detached
@@ -89,6 +95,16 @@ LIMITATION = ("The interval treats the 40 accepted pairs as interchangeable. "
 V4_LABEL = ("DESCRIPTIVE ONLY. Not used in any acceptance decision. The "
             "telemetry-off and telemetry-on blocks run one after the other, so "
             "any difference is confounded with block order and time drift.")
+
+# ---------------------------------------------------------------------------
+# P4b - PREREG_workload_validation_ADDENDUM_P4b.md (approved 2026-10-17, before
+# any P4b data). PREREG above is unchanged; P4b is judged on its P=4 criteria.
+# One timed unit = 4 GEMMs of 128x128; during jobs the 5 Hz logger reads sysfs
+# only, and the throttle flags are read between jobs.
+# ---------------------------------------------------------------------------
+P4B = {"label": "P4b", "P": 4, "n_b": 128, "gemms_per_unit": 4,
+       "v0b_jobs": 10, "v0b_units": 50, "v0c_jobs": 50, "telemetry": "sysfs"}
+P4B_ADDENDUM = "PREREG_workload_validation_ADDENDUM_P4b.md"
 
 
 class RerunsExhausted(RuntimeError):
@@ -424,8 +440,11 @@ class ConfigRun:
     report a later finding that invalidates frozen parameters."""
 
     def __init__(self, P: int, v0: dict, execute, store: Store | None = None,
-                 prereg: dict = PREREG, calibration_check=None, log=print):
+                 prereg: dict = PREREG, calibration_check=None, log=print,
+                 label: str | None = None, gemms_per_unit: int = 1):
         self.P, self.v0, self.execute, self.prereg = P, v0, execute, prereg
+        self.label = label or f"P{P}"          # block / parameter ids; "P4b" for P4b
+        self.gemms = gemms_per_unit
         self.store = store or Store(None)
         self.calibration_check = calibration_check
         self.log = log
@@ -438,7 +457,7 @@ class ConfigRun:
     # -- helpers ------------------------------------------------------------
     def _exec(self, phase, position, plan, params_id, record_units):
         n = self.budget.claim(phase, position)
-        bid = f"P{self.P}-{position}-e{n}"
+        bid = f"{self.label}-{position}-e{n}"
         res = self.execute(bid, phase, position, plan, params_id, True, record_units)
         self.store.block(res)
         self.history.append({"block_id": bid, "phase": phase, "position": position,
@@ -471,11 +490,13 @@ class ConfigRun:
                            "pairs_used": [p[0] for p in acc]})
             S = S_new
         frozen = {**{k: base[k] for k in ("P", "n_b", "u_h", "u_c")}, "S_ms": S,
-                  "params_id": f"P{self.P}-F{len(self.frozen_versions) + 1}",
+                  "params_id": f"{self.label}-F{len(self.frozen_versions) + 1}",
                   "calibration": rounds, "stale": False,
                   "frozen_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+        if self.gemms != 1:
+            frozen["gemms_per_unit"] = self.gemms
         self.frozen_versions.append(frozen)
-        self.store.json(f"P{self.P}/frozen_{frozen['params_id']}.json", frozen)
+        self.store.json(f"{self.label}/frozen_{frozen['params_id']}.json", frozen)
         self.log(f"  [P={self.P}] frozen {frozen['params_id']}: u_h={frozen['u_h']} "
                  f"u_c={frozen['u_c']} S={S:.2f} ms")
         return frozen
@@ -483,7 +504,7 @@ class ConfigRun:
     def _mark_stale(self, frozen, reason, accepted):
         frozen["stale"] = True
         frozen["stale_reason"] = reason
-        self.store.json(f"P{self.P}/frozen_{frozen['params_id']}.json", frozen)
+        self.store.json(f"{self.label}/frozen_{frozen['params_id']}.json", frozen)
         for res in accepted:
             self.store.mark_stale(res)
             self.stale_blocks.append(res.block_id)
@@ -520,6 +541,9 @@ class ConfigRun:
                 "S0_ms": wl.initial_sleep_ms(u_h, u_c, t_u), "t_u_ms": t_u,
                 "overhead_ms": o}
         out = {"P": self.P, "base": base}
+        if self.gemms != 1:                    # P4b: make_job_specs reads it from base/frozen
+            base["gemms_per_unit"] = self.gemms
+            out["config"] = self.label
         try:
             while True:
                 frozen = self._calibrate(base)
@@ -550,7 +574,10 @@ class ConfigRun:
 
     def partial(self, reason: str) -> dict:
         """State so far, for a run interrupted in this configuration."""
-        return self._finish({"P": self.P, "status": INCOMPLETE, "reason": reason})
+        out = {"P": self.P, "status": INCOMPLETE, "reason": reason}
+        if self.gemms != 1:
+            out["config"] = self.label
+        return self._finish(out)
 
 
 # ---------------------------------------------------------------------------
@@ -571,10 +598,34 @@ def _quick_read(backend):
                 "throttled": 0}
 
 
+class SysfsReader:
+    """P4b telemetry source during jobs: sysfs temperature and frequency only,
+    no subprocess. Its samples carry no throttle flags (throttled None); the
+    flags are read between jobs instead."""
+    name = "sysfs"
+
+    def __init__(self, backend):
+        self.b = backend
+
+    def read(self):
+        r = _quick_read(self.b)
+        return {"t_wall": time.monotonic(), "temp_c": r["temp_c"],
+                "freq_mhz": r["freq_mhz"], "throttled": None}
+
+
+def _flags(backend):
+    """Throttle flags now (vcgencmd get_throttled on the Pi), or None."""
+    read_flags = getattr(backend, "_throttle", None)
+    return read_flags() if read_flags else backend.read().get("throttled")
+
+
 class HardwareExecutor:
     def __init__(self, backend, idle_baseline_c, prereg: dict = PREREG,
                  kernel: str = "gemm", log=print, poll_s: float = 2.0,
-                 monitor_check=None):
+                 monitor_check=None, telemetry: str = "full"):
+        if telemetry not in ("full", "sysfs"):
+            raise ValueError(f"telemetry must be 'full' or 'sysfs', not {telemetry!r}")
+        self.telemetry = telemetry            # "sysfs" = P4b scheme (addendum section 2)
         self.b, self.prereg, self.kernel, self.log = backend, prereg, kernel, log
         self.idle = idle_baseline_c
         self.poll_s = poll_s
@@ -645,7 +696,8 @@ class HardwareExecutor:
             reason = "throttle flags unreadable"
         elif th0 & LIVE_FLAG_MASK:
             reason = f"live flags set before block ({hex(th0)})"
-        log = runner.TelemetryLogger(self.b, hz=self.prereg["telemetry_hz"]) \
+        src = SysfsReader(self.b) if self.telemetry == "sysfs" else self.b
+        log = runner.TelemetryLogger(src, hz=self.prereg["telemetry_hz"]) \
             if telemetry_on else None
         seen = 0
         if reason is None:
@@ -675,6 +727,13 @@ class HardwareExecutor:
                         reason = sample_violation(s, self.prereg)
                         if reason:
                             break
+                    if reason is None and self.telemetry == "sysfs":
+                        th = _flags(self.b)       # P4b: between jobs, outside the latency
+                        rec["throttled_after"] = th
+                        if th is None:
+                            reason = "throttle flags unreadable between jobs"
+                        elif th & LIVE_FLAG_MASK:
+                            reason = f"live throttle/under-voltage flags {hex(th)}"
                     if reason:
                         break
             except (wl.JobTimeout, wl.WorkerFailure) as e:
@@ -786,10 +845,10 @@ HASHED_FILES = ["validate_workload.py", "workload.py",
                 "monitor_guard.py"]
 
 
-def file_hashes(base=None) -> dict:
+def file_hashes(base=None, extra=()) -> dict:
     base = base or os.path.dirname(os.path.abspath(__file__))
     out = {}
-    for f in HASHED_FILES:
+    for f in list(HASHED_FILES) + list(extra):
         p = os.path.join(base, f)
         with open(p, "rb") as fh:
             out[f] = hashlib.sha256(fh.read()).hexdigest()
@@ -858,6 +917,89 @@ def run_all(execute, store: Store, prereg: dict = PREREG, log=print,
         raise
 
 
+def run_v0_p4b(execute, store: Store, prereg: dict = PREREG, p4b: dict = P4B,
+               log=print) -> dict:
+    """V0 for P4b (addendum section 2): V0b' unit timing and V0c' overhead at
+    P=4 with four-GEMM units. n_b is fixed (no V0a size selection)."""
+    budget = Budget(prereg["v0_reruns"])
+    n_b, g = p4b["n_b"], p4b["gemms_per_unit"]
+
+    def valid(position, plan, record):
+        while True:
+            n = budget.claim("v0", position)
+            res = execute(f"V0{position}-e{n}", "v0", position, plan, None, True, record)
+            store.block(res)
+            if res.valid:
+                return res
+
+    try:
+        b = valid("b", [{"spec": wl.JobSpec("UNIT", 4, n_b, p4b["v0b_units"], 0.0, g)}
+                        for _ in range(p4b["v0b_jobs"])], True)
+        c = valid("c", [{"spec": wl.JobSpec("ZERO", 4, n_b, 0, 0.0, g)}
+                        for _ in range(p4b["v0c_jobs"])], False)
+    except (RerunsExhausted, CooldownCap) as e:
+        return {"status": INCOMPLETE, "reason": str(e), "reruns_used": budget.used}
+    u4 = [u for j in b.jobs for u in j["unit_ms"]]
+    per_core = {}
+    for j in b.jobs:
+        for s in j["shards"]:
+            per_core.setdefault(str(s["core"]), []).append(
+                s["compute_ms"] / max(1, s["units_done"]))
+    core_med = {k: float(np.median(v)) for k, v in per_core.items()}
+    log(f"[validate] V0 P4b: t_u(4) {float(np.median(u4)):.3f} ms per "
+        f"{g}-GEMM unit, o(4) {float(np.median([j['latency_ms'] for j in c.jobs])):.3f} ms")
+    return {"status": "DONE", "config": p4b["label"], "n_b": n_b, "gemms_per_unit": g,
+            "t_u_ms": {"4": float(np.median(u4))}, "cv_4": _cv(u4),
+            "core_unit_ms": core_med, "slowest_core": max(core_med, key=core_med.get),
+            "overhead_ms": {"4": float(np.median([j["latency_ms"] for j in c.jobs]))},
+            "skew_ms_median_4": float(np.median([j["skew_ms"] for j in c.jobs])),
+            "reruns_used": budget.used}
+
+
+def new_report_p4b(p4b: dict = P4B) -> dict:
+    return {"overall": INCOMPLETE, "config_set": p4b["label"], "v0": None,
+            "v4": {"status": "NOT_APPLICABLE", "reason": "P4b runs V0b', V0c' and P4b only",
+                   "label": V4_LABEL},
+            "configs": {"4b": {"status": NOT_RUN}}}
+
+
+def run_p4b(execute, store: Store, prereg: dict = PREREG, p4b: dict = P4B, log=print,
+            report: dict | None = None, checkpoint=None) -> dict:
+    """V0b'/V0c' -> P4b calibration, acceptance and evaluation (addendum P4b).
+    Same interruption handling as run_all."""
+    report = new_report_p4b(p4b) if report is None else report
+    save = checkpoint or (lambda: None)
+    phase, run = "V0", None
+    try:
+        v0 = run_v0_p4b(execute, store, prereg, p4b, log)
+        report["v0"] = v0
+        save()
+        if v0["status"] != "DONE":
+            report["overall"] = INCOMPLETE
+            save()
+            return report
+        phase = "P4b"
+        log("[validate] configuration P4b")
+        run = ConfigRun(4, v0, execute, store, prereg, log=log, label=p4b["label"],
+                        gemms_per_unit=p4b["gemms_per_unit"])
+        report["configs"]["4b"] = run.run()
+        report["overall"] = (INCOMPLETE if report["configs"]["4b"]["status"] == INCOMPLETE
+                             else "COMPLETE")
+        save()
+        return report
+    except KeyboardInterrupt as e:
+        why = f"interrupted ({e or 'KeyboardInterrupt'}) during {phase}"
+        if phase == "V0":
+            report["v0"] = {"status": INCOMPLETE, "reason": why}
+        else:
+            report["configs"]["4b"] = (run.partial(why) if run is not None
+                                       else {"status": INCOMPLETE, "reason": why})
+        report["overall"] = INCOMPLETE
+        report["interrupted"] = why
+        save()
+        raise
+
+
 def _blas_libs():
     try:
         with open("/proc/self/maps") as f:
@@ -880,7 +1022,7 @@ def _summary(report) -> str:
     v0 = report["v0"] or {}
     lines.append(f"V0: {v0.get('status')}  n_b={v0.get('n_b')}  "
                  f"t_u={v0.get('t_u_ms')}  o={v0.get('overhead_ms')}")
-    for k in ("1", "4"):
+    for k in report["configs"]:
         c = report["configs"][k]
         line = f"P={k}: {c['status']}"
         if c.get("evaluation"):
@@ -910,9 +1052,18 @@ def main(argv=None):
                          "monitor_guard.py) before any load; exit without load if it is "
                          "not verified; stop the run if the watchdog is lost later. "
                          "tools/launch_validation.sh passes it.")
+    ap.add_argument("--config", choices=("all", "4b"), default="all",
+                    help="all = V0, P=1, P=4, V4 (PREREG_workload_validation.md); "
+                         "4b = V0b', V0c' and P4b only "
+                         "(PREREG_workload_validation_ADDENDUM_P4b.md)")
     args = ap.parse_args(argv)
+    is_p4b = args.config == "4b"
+    extra = (P4B_ADDENDUM,) if is_p4b else ()
     if args.plan:
-        print(json.dumps({"prereg": PREREG, "sha256": file_hashes()}, indent=1))
+        plan = {"prereg": PREREG, "sha256": file_hashes(extra=extra)}
+        if is_p4b:
+            plan["p4b"] = P4B
+        print(json.dumps(plan, indent=1))
         return 0
     if args.require_monitor is None or not args.require_monitor > 0:
         # No unmonitored runs: refused before any sensor read, file or pool.
@@ -929,15 +1080,18 @@ def main(argv=None):
         print(f"{root} exists; refusing to overwrite")
         return 2
     store = Store(root)
-    store.json("prereg.json", {"prereg": PREREG, "sha256": file_hashes(),
-                               "run_id": run_id,
-                               "written": time.strftime("%Y-%m-%d %H:%M:%S"),
-                               "host": platform.node(), "python": sys.version,
-                               "numpy": np.__version__, "blas_libs": _blas_libs(),
-                               "backend": b.name, "pid": os.getpid()})
+    pre = {"prereg": PREREG, "sha256": file_hashes(extra=extra),
+           "run_id": run_id,
+           "written": time.strftime("%Y-%m-%d %H:%M:%S"),
+           "host": platform.node(), "python": sys.version,
+           "numpy": np.__version__, "blas_libs": _blas_libs(),
+           "backend": b.name, "pid": os.getpid()}
+    if is_p4b:
+        pre.update(config_set="4b", p4b=P4B)
+    store.json("prereg.json", pre)
     old_handlers = (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGINT))
     signal.signal(signal.SIGTERM, _sigterm)
-    report = new_report()
+    report = new_report_p4b() if is_p4b else new_report()
     report.update(run_id=run_id, pid=os.getpid())
     ex, rc = None, 0
     try:
@@ -971,9 +1125,11 @@ def main(argv=None):
         idle = float(np.median(vals))
         report.update(idle_baseline_c=idle,
                       idle_window=[min(vals), max(vals), len(vals)])
-        ex = HardwareExecutor(b, idle, monitor_check=guard.raise_if_lost)
-        run_all(ex.execute, store, report=report,
-                checkpoint=lambda: store.json("report.json", report))
+        ex = HardwareExecutor(b, idle, monitor_check=guard.raise_if_lost,
+                              telemetry=P4B["telemetry"] if is_p4b else "full")
+        (run_p4b if is_p4b else run_all)(
+            ex.execute, store, report=report,
+            checkpoint=lambda: store.json("report.json", report))
     except KeyboardInterrupt as e:
         report["overall"] = INCOMPLETE
         report.setdefault("interrupted", f"interrupted ({e or 'KeyboardInterrupt'})")
@@ -991,7 +1147,7 @@ def main(argv=None):
                     "no SIGKILL was sent")
                 print(f"INTERVENTION REQUIRED: {report['intervention_required']}",
                       flush=True)
-        report.update(prereg_sha256=file_hashes(), statistics_limitation=LIMITATION,
+        report.update(prereg_sha256=file_hashes(extra=extra), statistics_limitation=LIMITATION,
                       finished=time.strftime("%Y-%m-%d %H:%M:%S"))
         store.json("report.json", report)
         with open(os.path.join(root, "report.txt"), "w") as f:

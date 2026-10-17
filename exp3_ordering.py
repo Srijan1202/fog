@@ -80,12 +80,15 @@ def _sha256(path):
         return hashlib.sha256(f.read()).hexdigest()
 
 
-def resolve_workload(report_path, P, is_mock):
+def resolve_workload(report_path, P, is_mock, config=None):
     """Fixed-work HOT/COOL specs for this run. Returns (info, refusal).
 
     Real hardware: only parameters frozen by a workload validation whose
     configuration P is ACCEPTED may be used, and only with the same
     workload.py that validation measured. Anything else is a refusal.
+    config="4b" selects configuration P4b (P=4, four-GEMM units,
+    PREREG_workload_validation_ADDENDUM_P4b.md); its jobs must then run under
+    P4b's telemetry scheme (info["telemetry"] == "sysfs").
     Mock: simulated jobs, never confirmatory, no validation needed.
     """
     import validate_workload as vw
@@ -103,9 +106,14 @@ def resolve_workload(report_path, P, is_mock):
                       "not COMPLETE" + (f" ({rep['reason']})" if rep.get("reason") else ""))
     if rep.get("interrupted"):
         return None, f"workload validation was interrupted ({rep['interrupted']})"
-    cfg = (rep.get("configs") or {}).get(str(P)) or {}
+    if config not in (None, "4b"):
+        return None, f"unknown workload configuration {config!r}"
+    if config == "4b" and P != 4:
+        return None, "configuration 4b is a P=4 configuration (--parallel 4)"
+    key = config or str(P)
+    cfg = (rep.get("configs") or {}).get(key) or {}
     if cfg.get("status") != vw.ACCEPTED:
-        return None, (f"workload validation for P={P} is "
+        return None, (f"workload validation for {'P4b' if config else f'P={P}'} is "
                       f"{cfg.get('status', 'missing')}, not {vw.ACCEPTED}"
                       + (f" ({cfg['reason']})" if cfg.get("reason") else ""))
     ev, frozen = cfg.get("evaluation") or {}, cfg.get("frozen") or {}
@@ -120,6 +128,10 @@ def resolve_workload(report_path, P, is_mock):
         return None, "frozen parameters are stale or incomplete"
     if frozen["P"] != P:
         return None, f"frozen parameters are for P={frozen['P']}, not P={P}"
+    want_g = vw.P4B["gemms_per_unit"] if config == "4b" else 1
+    if int(frozen.get("gemms_per_unit", 1)) != want_g:
+        return None, (f"frozen parameters have {frozen.get('gemms_per_unit', 1)} GEMMs "
+                      f"per unit, configuration {key} needs {want_g}")
     recorded = (rep.get("prereg_sha256") or {}).get("workload.py")
     if recorded != _sha256(wl.__file__):
         return None, ("workload.py differs from the version the validation "
@@ -127,6 +139,7 @@ def resolve_workload(report_path, P, is_mock):
     hot, cool = wl.make_job_specs(frozen)
     vals = ev.get("values", {})
     return ({"accepted": True, "mock": False, "hot": hot, "cool": cool,
+             "config": key, "telemetry": vw.P4B["telemetry"] if config == "4b" else "full",
              "frozen": frozen, "validation_run": rep.get("run_id"),
              "report": report_path,
              "cold_latency_match": {
@@ -136,7 +149,8 @@ def resolve_workload(report_path, P, is_mock):
                  "gap_ci": [gap.get("ci_lo"), gap.get("ci_hi")],
                  "gap_class": gap.get("class"),
                  "matched": True,
-                 "source": f"workload validation {rep.get('run_id')} (P={P})"}},
+                 "source": f"workload validation {rep.get('run_id')} "
+                           f"({'P4b' if config else f'P={P}'})"}},
             None)
 
 
@@ -239,6 +253,9 @@ def main():
                          "validated configuration (required on real hardware)")
     ap.add_argument("--workload-validation", default=None,
                     help="report.json from validate_workload.py")
+    ap.add_argument("--workload-config", choices=("4b",), default=None,
+                    help="4b = configuration P4b (with --parallel 4), validated by "
+                         "validate_workload.py --config 4b")
     ap.add_argument("--hz", type=float, default=5.0)
     ap.add_argument("--outdir", default="results")
     ap.add_argument("--seed", type=int, default=0)
@@ -277,11 +294,20 @@ def main():
               "(pipeline check only)")
 
     # ---- fixed-work jobs: only from an ACCEPTED workload validation ----
-    wk, refusal = resolve_workload(args.workload_validation, args.parallel, is_mock)
+    wk, refusal = resolve_workload(args.workload_validation, args.parallel, is_mock,
+                                   args.workload_config)
     if refusal:
         print(f"[exp3] REFUSING TO RUN: {refusal}")
         print("       Run validate_workload.py (with approval) and pass its")
         print("       report.json via --workload-validation.")
+        return 2
+    if wk.get("telemetry", "full") != "full":
+        # P4b jobs must run under P4b's telemetry scheme (sysfs-only during jobs) and
+        # Experiment 3 must record the ARM clock during load (A3); that scheme is
+        # specified in Amendment A4 and not implemented here yet.
+        print(f"[exp3] REFUSING TO RUN: configuration {wk['config']} needs the "
+              f"'{wk['telemetry']}' telemetry scheme of Amendment A4, which "
+              "exp3_ordering.py does not implement yet (no load started).")
         return 2
     hot, cool = wk["hot"], wk["cool"]
     vm = wk["cold_latency_match"]

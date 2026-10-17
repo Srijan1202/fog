@@ -442,6 +442,79 @@ class Interruption(unittest.TestCase):
         self.assertEqual(on_disk["overall"], vw.INCOMPLETE)
 
 
+class P4bConfiguration(unittest.TestCase):
+    """PREREG_workload_validation_ADDENDUM_P4b.md: V0b', V0c', then P4b judged
+    on PREREG's unchanged P=4 criteria."""
+
+    def test_p4b_constants_are_the_addendum_values(self):
+        self.assertEqual(vw.P4B, {"label": "P4b", "P": 4, "n_b": 128, "gemms_per_unit": 4,
+                                  "v0b_jobs": 10, "v0b_units": 50, "v0c_jobs": 50,
+                                  "telemetry": "sysfs"})
+
+    def test_addendum_states_the_same_values(self):
+        with open(os.path.join(os.path.dirname(vw.__file__), vw.P4B_ADDENDUM)) as f:
+            doc = f.read()
+        for s in ("4 consecutive 128×128 float32 matrix multiplies",
+                  "`gemms_per_unit = 4`", "10 P=4 UNIT jobs of 50 units",
+                  "50 P=4 ZERO jobs", "15, 15, 15, 15 pairs", "P = 4 column",
+                  "Criteria A1–A9", "A REJECTED P4b is final"):
+            self.assertIn(s, doc)
+
+    def test_complete_p4b_run(self):
+        fx = FakeExec()
+        rep = vw.run_p4b(fx, vw.Store(None), log=quiet)
+        self.assertEqual((rep["overall"], rep["config_set"]), ("COMPLETE", "P4b"))
+        c = rep["configs"]["4b"]
+        self.assertEqual((c["status"], c["config"]), (vw.ACCEPTED, "P4b"))
+        self.assertEqual(c["frozen"]["params_id"], "P4b-F1")
+        self.assertEqual(c["frozen"]["gemms_per_unit"], 4)
+        self.assertIn("A9", c["evaluation"]["criteria"])             # P=4 criteria
+        self.assertEqual(rep["v0"]["config"], "P4b")
+        self.assertEqual(rep["v4"]["status"], "NOT_APPLICABLE")
+        self.assertEqual(sorted(rep["configs"]), ["4b"])
+        specs = [i["spec"] for call in fx.calls for i in call["plan"]]
+        self.assertTrue(specs)
+        self.assertTrue(all(s.P == 4 and s.n_b == 128 and s.gemms_per_unit == 4
+                            for s in specs))                         # no P=1, no 1-GEMM job
+        self.assertEqual(fx.ids("v0"), ["V0b-e1", "V0c-e1"])         # no V0a size selection
+        self.assertEqual([i for i in fx.ids() if not i.startswith("V0")],
+                         ["P4b-C1-e1", "P4b-C2-e1", "P4b-A1-e1", "P4b-A2-e1",
+                          "P4b-A3-e1", "P4b-A4-e1"])
+        v0b = next(cl for cl in fx.calls if cl["block_id"] == "V0b-e1")
+        self.assertEqual(len(v0b["plan"]), 10)
+        self.assertEqual(v0b["plan"][0]["spec"].units_per_shard, 50)
+        v0c = next(cl for cl in fx.calls if cl["block_id"] == "V0c-e1")
+        self.assertEqual(len(v0c["plan"]), 50)
+
+    def test_p4b_failed_criterion_is_rejected(self):
+        rep = vw.run_p4b(FakeExec(gap=0.08), vw.Store(None), log=quiet)
+        self.assertEqual(rep["configs"]["4b"]["status"], vw.REJECTED)
+        self.assertEqual(rep["overall"], "COMPLETE")
+
+    def test_v0_incomplete_leaves_p4b_not_run(self):
+        rep = vw.run_p4b(FakeExec(invalid={"V0b-e1", "V0b-e2", "V0b-e3"}),
+                         vw.Store(None), log=quiet)
+        self.assertEqual((rep["overall"], rep["v0"]["status"]), (vw.INCOMPLETE, vw.INCOMPLETE))
+        self.assertEqual(rep["configs"]["4b"]["status"], vw.NOT_RUN)
+
+    def test_interrupt_in_p4b_is_incomplete(self):
+        rep = vw.new_report_p4b()
+        with self.assertRaises(KeyboardInterrupt):
+            vw.run_p4b(FakeExec(interrupt_at="P4b-A2-e1"), vw.Store(None), log=quiet,
+                       report=rep)
+        self.assertEqual(rep["overall"], vw.INCOMPLETE)
+        self.assertEqual(rep["configs"]["4b"]["status"], vw.INCOMPLETE)
+        self.assertIn("during P4b", rep["interrupted"])
+
+    def test_ordinary_configurations_are_unchanged(self):
+        out, fx, _ = run_config(P=4)
+        self.assertNotIn("gemms_per_unit", out["frozen"])
+        self.assertNotIn("config", out)
+        self.assertEqual(out["frozen"]["params_id"], "P4-F1")
+        self.assertTrue(all(i.startswith("P4-") for i in fx.ids()))
+        self.assertTrue(all(i["spec"].gemms_per_unit == 1 for c in fx.calls for i in c["plan"]))
+
+
 class FakeBackend:
     """Scripted sensor backend. Each *_fn gets the 1-based read count."""
     name = "fakehw"
@@ -584,6 +657,70 @@ class ExecutorGuards(unittest.TestCase):
                        "pid", True, False)
 
 
+class FlagBackend(FakeBackend):
+    """FakeBackend with a separate throttle-flag reader (vcgencmd on the Pi)."""
+
+    def __init__(self, flag_fn=lambda n: 0, **kw):
+        super().__init__(**kw)
+        self.flag_fn, self.flag_reads = flag_fn, 0
+
+    def _throttle(self):
+        self.flag_reads += 1
+        return self.flag_fn(self.flag_reads)
+
+
+class ExecutorSysfsTelemetryP4b(unittest.TestCase):
+    """P4b scheme: sysfs-only samples during jobs, flags read between jobs."""
+
+    def run_block(self, backend, plan=None):
+        ex = vw.HardwareExecutor(backend, 45.0, prereg=TEST_PREREG, kernel="noop",
+                                 log=quiet, poll_s=0.01, telemetry="sysfs")
+        self.addCleanup(ex.close)
+        return ex.execute("T-e1", "acceptance", "T",
+                          plan or vw.pair_plan(2, T_HOT, T_COOL_SLOW), "pid", True, False)
+
+    def test_clean_block_reads_flags_once_per_job_between_jobs(self):
+        b = FlagBackend()
+        res = self.run_block(b)
+        self.assertTrue(res.valid, res.reason)
+        self.assertEqual(b.flag_reads, len(res.jobs))
+        self.assertTrue(all(j["throttled_after"] == 0 for j in res.jobs))
+        self.assertTrue(res.telemetry)
+        self.assertTrue(all(s["throttled"] is None for s in res.telemetry))   # no flags in samples
+
+    def test_live_flag_between_jobs_invalidates(self):
+        res = self.run_block(FlagBackend(flag_fn=lambda n: 0 if n < 2 else 0x4))
+        self.assertFalse(res.valid)
+        self.assertIn("live throttle/under-voltage flags 0x4", res.reason)
+        self.assertEqual(len(res.jobs), 2)
+
+    def test_unreadable_flags_between_jobs_invalidate(self):
+        res = self.run_block(FlagBackend(flag_fn=lambda n: None))
+        self.assertFalse(res.valid)
+        self.assertIn("unreadable between jobs", res.reason)
+
+    def test_temperature_guard_still_applies(self):
+        b = FlagBackend(temp_fn=lambda n: 45.0 if n <= 2 else 66.0)
+        res = self.run_block(b)
+        self.assertFalse(res.valid)
+        self.assertIn("temperature 66.0", res.reason)
+
+    def test_full_mode_never_reads_flags_between_jobs(self):
+        b = FlagBackend()
+        ex = vw.HardwareExecutor(b, 45.0, prereg=TEST_PREREG, kernel="noop", log=quiet,
+                                 poll_s=0.01)
+        self.addCleanup(ex.close)
+        res = ex.execute("T-e1", "acceptance", "T", vw.pair_plan(1, T_HOT, T_COOL),
+                         "pid", True, False)
+        self.assertTrue(res.valid, res.reason)
+        self.assertEqual(b.flag_reads, 0)
+        self.assertNotIn("throttled_after", res.jobs[0])
+
+    def test_unknown_mode_is_refused(self):
+        with self.assertRaises(ValueError):
+            vw.HardwareExecutor(FakeBackend(), 45.0, telemetry="vcgencmd")
+
+
 class FakeGuard:
     """Stands in for monitor_guard.MonitorGuard in main() tests (software only;
     the real guard is tested against dummy watchdog processes)."""
@@ -695,6 +832,19 @@ class Main(unittest.TestCase):
         doc = json.loads(out)
         self.assertEqual(doc["prereg"]["accepted_pairs"], 40)
         self.assertEqual(sorted(doc["sha256"]), sorted(vw.HASHED_FILES))
+        gb.assert_not_called()
+        self.pool_boom.assert_not_called()
+        self.assertFalse(os.path.exists(self.out))
+
+    def test_p4b_plan_names_the_addendum_and_reads_nothing(self):
+        gb = mock.Mock(side_effect=AssertionError("no sensor may be read"))
+        with mock.patch.object(vw.sensors, "get_backend", gb):
+            rc, out = self.call(["--plan", "--config", "4b", "--outdir", self.out])
+        self.assertEqual(rc, 0)
+        doc = json.loads(out)
+        self.assertEqual(doc["p4b"], vw.P4B)
+        self.assertEqual(doc["prereg"]["A6_unit_cv_max"], {"1": 0.02, "4": 0.03})   # unchanged
+        self.assertEqual(sorted(doc["sha256"]), sorted(vw.HASHED_FILES + [vw.P4B_ADDENDUM]))
         gb.assert_not_called()
         self.pool_boom.assert_not_called()
         self.assertFalse(os.path.exists(self.out))

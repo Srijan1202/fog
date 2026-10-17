@@ -102,6 +102,41 @@ class CalibrationArithmetic(unittest.TestCase):
         self.assertEqual((S, clamped), (0.0, True))
 
 
+class GemmsPerUnitP4b(unittest.TestCase):
+    """PREREG_workload_validation_ADDENDUM_P4b.md: one timed unit = k kernels.
+    k defaults to 1, so P=1 and P4-F1 jobs are unchanged."""
+
+    def test_default_is_one_and_frozen_without_it_is_unchanged(self):
+        self.assertEqual(wl.JobSpec("HOT", 4, 128, 53).gemms_per_unit, 1)
+        hot, cool = wl.make_job_specs(SpecsAndMultisets.FROZEN)
+        self.assertEqual((hot.gemms_per_unit, cool.gemms_per_unit), (1, 1))
+
+    def test_frozen_p4b_parameters_give_four_gemm_units(self):
+        hot, cool = wl.make_job_specs({**SpecsAndMultisets.FROZEN, "gemms_per_unit": 4})
+        self.assertEqual((hot.gemms_per_unit, cool.gemms_per_unit), (4, 4))
+        self.assertEqual((hot.planned_units, cool.planned_units), (200, 72))   # units, not GEMMs
+
+    def test_job_record_names_the_unit(self):
+        spec = wl.JobSpec("HOT", 1, 8, 2, 0.0, 4)
+        shard = {"units_done": 2, "compute_ms": 8.0, "sleep_actual_ms": 0.0, "cpu_ms": 8.0,
+                 "t_start": 0.0, "t_end": 0.008, "wall_ms": 8.0, "nivcsw": 0}
+        self.assertEqual(wl.aggregate_job(spec, 0.009, [shard])["gemms_per_unit"], 4)
+
+    def test_worker_times_k_kernels_as_one_unit(self):
+        pool = wl.FixedWorkPool(1, kernel="spin:2")
+        try:
+            one = pool.run_job(wl.JobSpec("HOT", 1, 8, 3), record_units=True)
+            four = pool.run_job(wl.JobSpec("HOT", 1, 8, 3, 0.0, 4), record_units=True)
+        finally:
+            pool.stop()
+        self.assertEqual((one["units_done"], four["units_done"]), (3, 3))
+        self.assertEqual((len(one["unit_ms"]), len(four["unit_ms"])), (3, 3))
+        for u in one["unit_ms"]:
+            self.assertTrue(1.9 <= u < 4.0, u)
+        for u in four["unit_ms"]:
+            self.assertTrue(7.9 <= u < 12.0, u)            # 4 x 2 ms spin per unit
+
+
 class PoolWithTestKernels(unittest.TestCase):
     """Real worker processes; test kernels only (no gemm, no thermal load)."""
 

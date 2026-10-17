@@ -215,12 +215,15 @@ class WorkerFailure(RuntimeError):
 
 @dataclass(frozen=True)
 class JobSpec:
-    """A fixed-work job. `name` is HOT or COOL (used by order_sequence)."""
+    """A fixed-work job. `name` is HOT or COOL (used by order_sequence).
+    One unit = `gemms_per_unit` consecutive n_b x n_b GEMMs, timed together
+    (1 for P=1 and P4-F1; 4 for P4b, PREREG_workload_validation_ADDENDUM_P4b.md)."""
     name: str
     P: int
     n_b: int
     units_per_shard: int
     sleep_per_shard_ms: float = 0.0
+    gemms_per_unit: int = 1
 
     @property
     def planned_units(self) -> int:
@@ -234,10 +237,11 @@ class JobSpec:
 
 def make_job_specs(frozen: dict) -> tuple[JobSpec, JobSpec]:
     """HOT and COOL specs from frozen calibration parameters
-    {P, n_b, u_h, u_c, S_ms}. HOT never sleeps."""
-    hot = JobSpec("HOT", frozen["P"], frozen["n_b"], frozen["u_h"], 0.0)
+    {P, n_b, u_h, u_c, S_ms[, gemms_per_unit]}. HOT never sleeps."""
+    g = int(frozen.get("gemms_per_unit", 1))
+    hot = JobSpec("HOT", frozen["P"], frozen["n_b"], frozen["u_h"], 0.0, g)
     cool = JobSpec("COOL", frozen["P"], frozen["n_b"], frozen["u_c"],
-                   float(frozen["S_ms"]))
+                   float(frozen["S_ms"]), g)
     return hot, cool
 
 
@@ -289,6 +293,7 @@ def aggregate_job(spec: JobSpec, latency_s: float, shards: list,
         unit_ms = [u for s in shards for u in s["unit_ms"]]
     return {
         "class": spec.name, "P": spec.P, "n_b": spec.n_b,
+        "gemms_per_unit": spec.gemms_per_unit,
         "units_planned": spec.planned_units,
         "units_done": sum(s["units_done"] for s in shards),
         "latency_ms": lat_ms,
@@ -375,9 +380,17 @@ def _fw_worker(idx, core, kernel_kind, conn, parent_pid):
             return
         n_b, units = msg["n_b"], msg["units"]
         gap, rec = msg["sleep_gap_s"], msg["record_units"]
-        k = kernels.get(n_b)
+        g = msg.get("gemms", 1)
+        k = kernels.get((n_b, g))
         if k is None:
-            k = kernels[n_b] = _make_kernel(kernel_kind, n_b)
+            k1 = _make_kernel(kernel_kind, n_b)
+            if g == 1:
+                k = k1                                  # the original unit, unchanged
+            else:
+                def k(k1=k1, g=g):                      # P4b: g kernels per timed unit
+                    for _ in range(g):
+                        k1()
+            kernels[(n_b, g)] = k
         # process_time: CPU of every thread in this worker (a multithreaded
         # BLAS would otherwise be missed). Same value for a single thread.
         v0, c0, t_start = _nivcsw(), time.process_time(), time.monotonic()
@@ -450,7 +463,7 @@ class FixedWorkPool:
         u = spec.units_per_shard
         gap = (spec.sleep_per_shard_ms / 1000.0 / u) if u > 0 else 0.0
         msg = {"n_b": spec.n_b, "units": u, "sleep_gap_s": gap,
-               "record_units": record_units}
+               "record_units": record_units, "gemms": spec.gemms_per_unit}
         c0 = time.thread_time()
         t0 = time.monotonic()
         for i, c in enumerate(self.conns):
