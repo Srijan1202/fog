@@ -64,7 +64,11 @@ CONDITIONS = {"F": "vcgencmd get_throttled between jobs (P4b scheme)",
 MODES = {"telemetry": (ORDER, CONDITIONS),
          "watchdog": (("W", "N", "N", "W") * 4,
                       {"W": "watchdog-like poller every 5 s (validation_monitor.sh loop commands)",
-                       "N": "no poller"})}
+                       "N": "no poller"}),
+         # P4c check: W runs the fork-free watchdog's loop body (builtins only)
+         "watchdog-nf": (("W", "N", "N", "W") * 4,
+                         {"W": "fork-free poller every 5 s (P4c validation_monitor.sh loop body)",
+                          "N": "no poller"})}
 POLLER = r'''
 STOP=$1; LOG=$2; VP=$3
 while [ ! -e "$STOP" ]; do
@@ -80,9 +84,30 @@ done
 '''
 
 
-def start_poller(stop, log, ppid):
+POLLER_NF = r'''
+STOP=$1; LOG=$2; VP=$3
+UV=""; for h in /sys/class/hwmon/hwmon*; do n=""; { read -r n < "$h/name"; } 2>/dev/null
+  [ "$n" = rpi_volt ] && UV="$h/in0_lcrit_alarm"; done
+exec {SFD}<> <(:)
+up() { local u; read -r u _ < /proc/uptime; printf '%s %s\n' "$u" "$1" >> "$LOG"; }
+while [ ! -e "$STOP" ]; do
+  up start
+  for f in "/proc/$VP/task/"*/children; do k=(); { read -r -a k < "$f"; } 2>/dev/null
+    for c in "${k[@]}"; do { read -r s < "/proc/$c/stat"; } 2>/dev/null; a=(); { mapfile -d '' -t a < "/proc/$c/cmdline"; } 2>/dev/null; done; done
+  T=""; { read -r T < /sys/class/thermal/thermal_zone0/temp; } 2>/dev/null
+  U=""; [ -n "$UV" ] && { read -r U < "$UV"; } 2>/dev/null
+  t=$(( (${T:-0} + 50) / 100 )); printf -v R '%4d.%d   uv=%s' $((t / 10)) $((t % 10)) "${U:-?}"
+  printf -v ts '%(%F %T)T' -1; printf '%s %s\n' "$ts" "$R" >> "$LOG.readings"
+  [ $(( EPOCHSECONDS - 0 )) -ge 0 ]
+  up end
+  for i in 1 2 3 4 5; do [ -e "$STOP" ] && break; read -r -t 1 -u "$SFD" _ ; done
+done
+'''
+
+
+def start_poller(stop, log, ppid, script=POLLER):
     import subprocess
-    return subprocess.Popen(["bash", "-c", POLLER, "poller", stop, log, str(ppid)],
+    return subprocess.Popen(["bash", "-c", script, "poller", stop, log, str(ppid)],
                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL)
 
@@ -122,9 +147,13 @@ def poll_intervals(log, offset):
 
 
 def mark_overlap(jobs, intervals):
-    """job["poll_overlap"]: a poller iteration overlapped the job's [t0, t1]."""
+    """job["poll_overlap"]: a poller iteration overlapped the job's [t0, t1].
+    intervals: [(block, start, end)] - only the job's own block counts (uptime
+    has 10 ms resolution, so a boundary iteration must not spill into the next
+    block) - or [(start, end)], which apply to every job."""
     for j in jobs:
-        j["poll_overlap"] = any(s < j["t1_mono"] and e > j["t0_mono"] for s, e in intervals)
+        j["poll_overlap"] = any(s < j["t1_mono"] and e > j["t0_mono"]
+                                for *b, s, e in intervals if not b or b[0] == j.get("block"))
     return jobs
 
 
@@ -349,7 +378,8 @@ def main(argv=None):
             if cond == "W":
                 stop_f = os.path.join(args.outdir, f"poller{bi}.stop")
                 poll_log = os.path.join(args.outdir, f"poller{bi}.log")
-                poller = start_poller(stop_f, poll_log, os.getpid())
+                poller = start_poller(stop_f, poll_log, os.getpid(),
+                                      POLLER_NF if args.mode == "watchdog-nf" else POLLER)
             block, t_block = [], time.monotonic()
             try:
                 for item in vw.pair_plan(args.pairs_per_block, hot, cool):
@@ -373,7 +403,7 @@ def main(argv=None):
                                during=diff(snap, s0, s1, own, os.getpid()),
                                shard_walls=[round(s["wall_ms"], 3) for s in rec["shards"]])
                     rec.pop("shards", None)
-                    if cond == "F" or args.mode == "watchdog":
+                    if cond == "F" or args.mode.startswith("watchdog"):
                         rec["throttled_after"] = vw._flags(b)   # between jobs, as P4b
                     block.append(rec)
             finally:
@@ -385,7 +415,7 @@ def main(argv=None):
                     if left:
                         poller_unstopped.append(left)
                     poller = None
-                    intervals += poll_intervals(poll_log, offset)
+                    intervals += [(bi, s, e) for s, e in poll_intervals(poll_log, offset)]
                 load_s += time.monotonic() - t_block
                 jobs += block
                 blocks.append({"block": bi, "condition": cond, "jobs_run": len(block),
@@ -413,7 +443,7 @@ def main(argv=None):
             unstopped = list(pool.unstopped)
 
     mark_stalls(jobs)
-    if args.mode == "watchdog":
+    if args.mode.startswith("watchdog"):
         mark_overlap(jobs, intervals)
     summary = summarize(jobs, conds)
     meta = {"experiment": "diag_p4_stalls", "label": "DIAGNOSTIC - not confirmatory",

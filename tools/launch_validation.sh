@@ -245,7 +245,7 @@ MPID=$!
 echo "== PHASE 5 watchdog started: pid $MPID"
 MCMD="bash tools/validation_monitor.sh $VPID $OUT/$RUN "
 MLOG="$OUT/$RUN/monitor.log"
-READING='^[0-9-]+ [0-9:]+ +[0-9]+[.,][0-9]   0x[0-9a-fA-F]+$'
+READING='^[0-9-]+ [0-9:]+ +[0-9]+[.,][0-9]   (0x[0-9a-fA-F]+|uv=[01])$'
 for k in $(seq 1 48); do grep -qE "$READING" "$MLOG" 2>/dev/null && break; sleep 0.25; done
 MST=$(st 20 "$MPID")
 { [ -n "$MST" ] && [ "$(st 1 "$MPID")" != Z ]; } || monitoring_failed "watchdog not running (output: $(tr '\n' ' ' < "$OUT/$RUN.monitor.out" 2>/dev/null))"

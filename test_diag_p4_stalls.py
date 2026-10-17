@@ -212,6 +212,33 @@ class WatchdogMode(unittest.TestCase):
                          [f"poller{i}.stop" for i in (0, 11, 12, 15, 3, 4, 7, 8)])
 
 
+class ForkFreePollerP4c(unittest.TestCase):
+    def test_poller_nf_uses_no_external_command(self):
+        body = ds.POLLER_NF.replace("$((", "ARITH(")            # arithmetic is builtin
+        self.assertNotIn("$(", body)                             # no command substitution
+        self.assertIsNone(re.search(r"(?<!\|)\|(?!\|)", body))  # no pipes (|| is fine)
+        for cmd in ("sleep", "cat ", "date", " bc", "pgrep", "cut ", "vcgencmd", "awk", "tr "):
+            self.assertNotIn(cmd, body)
+        self.assertIn("exec {SFD}<> <(:)", body)                 # the one start-up fork
+
+    def test_watchdog_nf_mode_end_to_end(self):
+        d = tempfile.mkdtemp(prefix="stalls_nf_")
+        out = os.path.join(d, "run")
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            rc = ds.main(["--backend", "mock", "--report", _report(d), "--outdir", out,
+                          "--mode", "watchdog-nf", "--pairs-per-block", "4", "--poll-s", "0.01"])
+        self.assertEqual(rc, 0)
+        with open(os.path.join(out, "stalls.meta.json")) as f:
+            m = json.load(f)
+        self.assertTrue(m["complete"])
+        self.assertEqual(m["mode"], "watchdog-nf")
+        self.assertIn("fork-free", m["conditions"]["W"])
+        self.assertGreaterEqual(m["poll_iterations"], 8)
+        self.assertEqual(m["poller_unstopped"], [])
+        with open(os.path.join(out, "poller0.log.readings")) as f:
+            self.assertRegex(f.readline(), r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d +\d+\.\d   uv=")
+
+
 class NeverSignalsItself(unittest.TestCase):
     def test_source_sends_no_signals(self):
         with open(ds.__file__) as f:
