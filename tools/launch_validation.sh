@@ -18,7 +18,7 @@
 # monitoring not established; 5 token written but not acknowledged.
 {
 # BEGIN SITE CONFIG
-RUN=wv-p4b-20261017-01
+RUN=wv-p4b-20261017-02
 B0=049f6578-3b7a-4b72-b36d-cf171d5f447c
 HOST_EXPECTED=pi
 PROJECT="$HOME/tdas-pilot"
@@ -40,13 +40,13 @@ LAUNCH_PATH=/usr/sbin:/usr/bin:/sbin:/bin
 LAUNCH_LANG=en_GB.UTF-8
 ARCHIVES="results/exp1_1core results/exp1_4core"
 EXPECTED_HASHES='
-c024243bcf7fe258e6e46daa6792ae3c4f0819761e168b3ed881c2d6136fb08b validate_workload.py
+1bccf2e899509f8d878c7f6cf380dfe548c0e44bb39d586b8f6b0242f6bd352b validate_workload.py
 aabc88f6f23de2be782ca727e473ce3a02b2bf3f1f602ad02a5fd75b217a3033 workload.py
 acc4d28a6f422fb22c307da3574e26efb3129610e73616bb49f7b719f9f454e3 monitor_guard.py
 31665b5a42dce04b1d97dc66be2df7fc44cba97a7c72f285cad53beb2f59a285 runner.py
 d9df2f74772c9bd0ac0cc8204f59fb97088df3744dbc16048e6eb4e7ae52c9bc sensors.py
 05ab24e5ea4c8bad9e356990328a9b1b4529c1f40d95b08f73471b0d28ece864 PREREG_workload_validation.md
-2f2ff9972c812476725d74eca8baf2537f6a5861a92c11b988079e4218b40484 PREREG_workload_validation_ADDENDUM_P4b.md
+7fc6fa01597e8808069b1ad1f84dc2929e55e89575616698d35be39a6c778049 PREREG_workload_validation_ADDENDUM_P4b.md
 15adfeeb21b6fa44a857e5172066a1adeba92ad69be8376e8d1c7a283ebe4eba tools/validation_monitor.sh
 33fc0af9684cf8723686ca7d4e0a35812e22f23b2557afc1a189ec233adeb90f results/exp1_1core/SHA256SUMS
 42d58faf87a17ee703ffbdc502807f366f39d3b2de00cb36f4bad6308a3106f7 results/exp1_1core/LABEL.txt
