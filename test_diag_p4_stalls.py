@@ -294,6 +294,38 @@ class MailboxModeA4(unittest.TestCase):
         boom.assert_not_called()
 
 
+class HotOnlyAndJitter(unittest.TestCase):
+    def test_jittered_gaps_are_bounded_reproducible_and_average_the_period(self):
+        r1 = ds.ClockReader(ds.FakeClock(), hz=1.0, jitter=0.5, seed=3)
+        r2 = ds.ClockReader(ds.FakeClock(), hz=1.0, jitter=0.5, seed=3)
+        g1 = [r1.next_gap() for _ in range(2000)]
+        self.assertEqual(g1[:20], [r2.next_gap() for _ in range(20)])
+        self.assertTrue(all(0.5 <= g <= 1.5 for g in g1))
+        self.assertAlmostEqual(sum(g1) / len(g1), 1.0, delta=0.02)
+        self.assertGreater(max(g1) - min(g1), 0.9)                   # not a fixed cadence
+        self.assertEqual(ds.ClockReader(ds.FakeClock(), hz=2.0).next_gap(), 0.5)  # no jitter
+        with self.assertRaises(ValueError):
+            ds.ClockReader(ds.FakeClock(), jitter=1.0)
+
+    def test_hot_only_mailbox_run(self):
+        d = tempfile.mkdtemp(prefix="stalls_hot_")
+        out = os.path.join(d, "run")
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = ds.main(["--backend", "mock", "--report", _report(d), "--outdir", out,
+                          "--mode", "mailbox", "--hot-only", "--pairs-per-block", "3",
+                          "--poll-s", "0.01", "--clock-hz", "5"])
+        self.assertEqual(rc, 0)
+        with open(os.path.join(out, "stalls.meta.json")) as f:
+            m = json.load(f)
+        self.assertTrue(m["complete"])
+        self.assertEqual((m["hot_only"], m["clock_hz"], m["clock_jitter"]), (True, 5.0, 0.5))
+        with open(os.path.join(out, "stalls.jobs.jsonl")) as f:
+            jobs = [json.loads(x) for x in f]
+        self.assertEqual(len(jobs), 16 * 6)
+        self.assertEqual({j["class"] for j in jobs}, {"HOT"})
+        self.assertEqual([j["pair"] for j in jobs[:6]], [0, 0, 1, 1, 2, 2])
+
+
 class RestoresSignalHandlers(unittest.TestCase):
     def test_handlers_restored_after_main(self):
         import signal

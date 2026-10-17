@@ -75,7 +75,7 @@ MODES = {"telemetry": (ORDER, CONDITIONS),
          # A4 stall control: W reads the firmware ARM clock through the mailbox at
          # 5 Hz from a parent thread (fwclock.py), as Experiment 2's telemetry would
          "mailbox": (("W", "N", "N", "W") * 4,
-                     {"W": "5 Hz firmware-mailbox ARM-clock reads in a parent thread (A4)",
+                     {"W": "firmware-mailbox ARM-clock reads in a parent thread (A4; rate: clock_hz)",
                       "N": "no clock reads"})}
 
 
@@ -91,19 +91,28 @@ class FakeClock:
 
 
 class ClockReader:
-    """5 Hz reads of a clock in a thread; records (t_start, t_end, MHz or None)."""
+    """Reads a clock in a thread at `hz` on average; records (t_start, t_end, MHz
+    or None). jitter j in [0, 1): each gap is period x U(1 - j, 1 + j) from a
+    seeded generator, so reads cannot lock in phase with the job cadence (at a
+    fixed 1 Hz they all fell on COOL jobs in diag-stalls-20261018-02)."""
 
-    def __init__(self, clock, hz=5.0):
-        self.clock, self.period = clock, 1.0 / hz
+    def __init__(self, clock, hz=1.0, jitter=0.0, seed=0):
+        if not 0.0 <= jitter < 1.0:
+            raise ValueError("jitter must be in [0, 1)")
+        self.clock, self.period, self.jitter = clock, 1.0 / hz, jitter
+        self.rng = np.random.default_rng(seed)
         self.samples, self._stop = [], threading.Event()
         self._t = threading.Thread(target=self._loop, daemon=True)
+
+    def next_gap(self):
+        return self.period * (1.0 + self.jitter * (2.0 * self.rng.random() - 1.0))
 
     def _loop(self):
         while not self._stop.is_set():
             t0 = time.monotonic()
             v = self.clock.read()
             self.samples.append((t0, time.monotonic(), v))
-            self._stop.wait(max(0.0, self.period - (time.monotonic() - t0)))
+            self._stop.wait(max(0.0, self.next_gap() - (time.monotonic() - t0)))
 
     def start(self):
         self._t.start()
@@ -378,6 +387,11 @@ def main(argv=None):
     ap.add_argument("--poll-s", type=float, default=2.0)
     ap.add_argument("--max-load-s", type=float, default=600.0)
     ap.add_argument("--hz", type=float, default=5.0)
+    ap.add_argument("--clock-jitter", type=float, default=0.5,
+                    help="--mode mailbox: each read gap is (1/clock-hz) x U(1-j, 1+j), seed 0")
+    ap.add_argument("--hot-only", action="store_true",
+                    help="blocks of HOT jobs back to back (Experiment 2's load) instead of "
+                         "HOT/COOL pairs; 'pair' = seq // 2 for the warm-up rule")
     ap.add_argument("--clock-hz", type=float, default=1.0,
                     help="--mode mailbox: ARM-clock reads per second in W blocks (A4: 1 Hz; "
                          "5 Hz added a small latency tail in diag-stalls-20261018-01)")
@@ -435,7 +449,7 @@ def main(argv=None):
             log = runner.TelemetryLogger(vw.SysfsReader(b), hz=args.hz)
             log.start()
             if cond == "W" and args.mode == "mailbox":
-                reader = ClockReader(clock, args.clock_hz).start()
+                reader = ClockReader(clock, args.clock_hz, args.clock_jitter, seed=bi).start()
             elif cond == "W":
                 stop_f = os.path.join(args.outdir, f"poller{bi}.stop")
                 poll_log = os.path.join(args.outdir, f"poller{bi}.log")
@@ -443,7 +457,10 @@ def main(argv=None):
                                       POLLER_NF if args.mode == "watchdog-nf" else POLLER)
             block, t_block = [], time.monotonic()
             try:
-                for item in vw.pair_plan(args.pairs_per_block, hot, cool):
+                plan = ([{"spec": hot, "pair": k // 2, "pos": k % 2}
+                         for k in range(2 * args.pairs_per_block)] if args.hot_only
+                        else vw.pair_plan(args.pairs_per_block, hot, cool))
+                for item in plan:
                     t = temp()
                     if t is None:
                         stop_reason = "temperature unreadable"
@@ -531,6 +548,8 @@ def main(argv=None):
             "pairs_per_block": args.pairs_per_block, "max_temp_c": args.max_temp,
             "cooldown_below_c": args.cooldown_below, "max_load_s": args.max_load_s,
             "clock_hz": args.clock_hz if args.mode == "mailbox" else None,
+            "clock_jitter": args.clock_jitter if args.mode == "mailbox" else None,
+            "hot_only": args.hot_only,
             "load_s": round(load_s, 3), "stop_reason": stop_reason, "interrupted": interrupted,
             "complete": stop_reason is None and interrupted is None and len(blocks) == len(order),
             "unstopped_workers": unstopped, "blocks": blocks, "summary": summary,
