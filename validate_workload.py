@@ -105,6 +105,17 @@ V4_LABEL = ("DESCRIPTIVE ONLY. Not used in any acceptance decision. The "
 P4B = {"label": "P4b", "P": 4, "n_b": 128, "gemms_per_unit": 4,
        "v0b_jobs": 10, "v0b_units": 12, "v0c_jobs": 50, "telemetry": "sysfs"}   # v0b_units: Amendment 1 (was 50)
 P4B_ADDENDUM = "PREREG_workload_validation_ADDENDUM_P4b.md"
+# P4c - PREREG_workload_validation_ADDENDUM_P4c.md: P4b's job design (as amended)
+# under the fork-free watchdog (tools/validation_monitor.sh, commit 2db3d44).
+P4C = {**P4B, "label": "P4c"}
+P4C_ADDENDUM = "PREREG_workload_validation_ADDENDUM_P4c.md"
+FOUR_CORE = {"4b": (P4B, (P4B_ADDENDUM,)),
+             "4c": (P4C, (P4B_ADDENDUM, P4C_ADDENDUM, "tools/validation_monitor.sh"))}
+
+
+def config_key(p4b: dict) -> str:
+    """Report key of a four-core configuration: "P4b" -> "4b", "P4c" -> "4c"."""
+    return p4b["label"][1:].lower()
 
 
 class RerunsExhausted(RuntimeError):
@@ -960,7 +971,7 @@ def new_report_p4b(p4b: dict = P4B) -> dict:
     return {"overall": INCOMPLETE, "config_set": p4b["label"], "v0": None,
             "v4": {"status": "NOT_APPLICABLE", "reason": "P4b runs V0b', V0c' and P4b only",
                    "label": V4_LABEL},
-            "configs": {"4b": {"status": NOT_RUN}}}
+            "configs": {config_key(p4b): {"status": NOT_RUN}}}
 
 
 def run_p4b(execute, store: Store, prereg: dict = PREREG, p4b: dict = P4B, log=print,
@@ -968,6 +979,7 @@ def run_p4b(execute, store: Store, prereg: dict = PREREG, p4b: dict = P4B, log=p
     """V0b'/V0c' -> P4b calibration, acceptance and evaluation (addendum P4b).
     Same interruption handling as run_all."""
     report = new_report_p4b(p4b) if report is None else report
+    key = config_key(p4b)
     save = checkpoint or (lambda: None)
     phase, run = "V0", None
     try:
@@ -978,12 +990,12 @@ def run_p4b(execute, store: Store, prereg: dict = PREREG, p4b: dict = P4B, log=p
             report["overall"] = INCOMPLETE
             save()
             return report
-        phase = "P4b"
-        log("[validate] configuration P4b")
+        phase = p4b["label"]
+        log(f"[validate] configuration {p4b['label']}")
         run = ConfigRun(4, v0, execute, store, prereg, log=log, label=p4b["label"],
                         gemms_per_unit=p4b["gemms_per_unit"])
-        report["configs"]["4b"] = run.run()
-        report["overall"] = (INCOMPLETE if report["configs"]["4b"]["status"] == INCOMPLETE
+        report["configs"][key] = run.run()
+        report["overall"] = (INCOMPLETE if report["configs"][key]["status"] == INCOMPLETE
                              else "COMPLETE")
         save()
         return report
@@ -992,7 +1004,7 @@ def run_p4b(execute, store: Store, prereg: dict = PREREG, p4b: dict = P4B, log=p
         if phase == "V0":
             report["v0"] = {"status": INCOMPLETE, "reason": why}
         else:
-            report["configs"]["4b"] = (run.partial(why) if run is not None
+            report["configs"][key] = (run.partial(why) if run is not None
                                        else {"status": INCOMPLETE, "reason": why})
         report["overall"] = INCOMPLETE
         report["interrupted"] = why
@@ -1052,17 +1064,18 @@ def main(argv=None):
                          "monitor_guard.py) before any load; exit without load if it is "
                          "not verified; stop the run if the watchdog is lost later. "
                          "tools/launch_validation.sh passes it.")
-    ap.add_argument("--config", choices=("all", "4b"), default="all",
+    ap.add_argument("--config", choices=("all", "4b", "4c"), default="all",
                     help="all = V0, P=1, P=4, V4 (PREREG_workload_validation.md); "
                          "4b = V0b', V0c' and P4b only "
-                         "(PREREG_workload_validation_ADDENDUM_P4b.md)")
+                         "(PREREG_workload_validation_ADDENDUM_P4b.md); 4c = the same "
+                         "for P4c (..._ADDENDUM_P4c.md, fork-free watchdog)")
     args = ap.parse_args(argv)
-    is_p4b = args.config == "4b"
-    extra = (P4B_ADDENDUM,) if is_p4b else ()
+    is_p4b = args.config in FOUR_CORE                 # 4b or 4c
+    four, extra = FOUR_CORE.get(args.config, (None, ()))
     if args.plan:
         plan = {"prereg": PREREG, "sha256": file_hashes(extra=extra)}
         if is_p4b:
-            plan["p4b"] = P4B
+            plan[four["label"].lower()] = four
         print(json.dumps(plan, indent=1))
         return 0
     if args.require_monitor is None or not args.require_monitor > 0:
@@ -1087,11 +1100,11 @@ def main(argv=None):
            "numpy": np.__version__, "blas_libs": _blas_libs(),
            "backend": b.name, "pid": os.getpid()}
     if is_p4b:
-        pre.update(config_set="4b", p4b=P4B)
+        pre.update({"config_set": args.config, four["label"].lower(): four})
     store.json("prereg.json", pre)
     old_handlers = (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGINT))
     signal.signal(signal.SIGTERM, _sigterm)
-    report = new_report_p4b() if is_p4b else new_report()
+    report = new_report_p4b(four) if is_p4b else new_report()
     report.update(run_id=run_id, pid=os.getpid())
     ex, rc = None, 0
     try:
@@ -1126,10 +1139,13 @@ def main(argv=None):
         report.update(idle_baseline_c=idle,
                       idle_window=[min(vals), max(vals), len(vals)])
         ex = HardwareExecutor(b, idle, monitor_check=guard.raise_if_lost,
-                              telemetry=P4B["telemetry"] if is_p4b else "full")
-        (run_p4b if is_p4b else run_all)(
-            ex.execute, store, report=report,
-            checkpoint=lambda: store.json("report.json", report))
+                              telemetry=four["telemetry"] if is_p4b else "full")
+        if is_p4b:
+            run_p4b(ex.execute, store, p4b=four, report=report,
+                    checkpoint=lambda: store.json("report.json", report))
+        else:
+            run_all(ex.execute, store, report=report,
+                    checkpoint=lambda: store.json("report.json", report))
     except KeyboardInterrupt as e:
         report["overall"] = INCOMPLETE
         report.setdefault("interrupted", f"interrupted ({e or 'KeyboardInterrupt'})")

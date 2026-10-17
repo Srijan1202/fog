@@ -24,10 +24,11 @@ esac
 """
 
 HANG = r"""#!/bin/sh
-d=$(dirname "$0")
-trap 'echo term >> "$d/signals"; exit 0' TERM
+trap 'echo term >> "${0%/*}/signals"; exit 0' TERM
 while :; do sleep 0.1; done
 """
+# The trap is the first command and starts no process, so it is installed long
+# before the 2 s timeout even on a busy machine.
 
 
 def _script(d, body):
@@ -75,6 +76,12 @@ class ArmClock(unittest.TestCase):
         self.assertIsNone(self.b.read()["arm_clock_mhz"])
 
     def test_hung_vcgencmd_gets_one_sigterm_never_sigkill(self):
+        # A child inherits an IGNORED SIGTERM, and a shell cannot trap a signal it
+        # started with ignored. Earlier tests that run exp1/diagnostic main() in
+        # this process can leave SIGTERM ignored, so start from the default here.
+        import signal
+        old = signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        self.addCleanup(signal.signal, signal.SIGTERM, old)
         self.b.vcgencmd = _script(self.d, HANG)
         t0 = time.monotonic()
         self.assertIsNone(self.b._arm_clock())

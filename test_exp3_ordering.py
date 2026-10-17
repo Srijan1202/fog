@@ -230,6 +230,21 @@ class WorkloadValidationGate(unittest.TestCase):
                 self.assertIsNone(info)
                 self.assertTrue(refusal)
 
+    def test_p4c_validation_is_accepted_under_its_own_key(self):
+        rep = self.p4b_report()
+        cfg = rep["configs"].pop("4b")
+        cfg["frozen"]["params_id"] = "P4c-F1"
+        rep["configs"]["4c"] = cfg
+        info, refusal = e3.resolve_workload(write_report(rep), 4, is_mock=False, config="4c")
+        self.assertIsNone(refusal)
+        self.assertEqual((info["config"], info["telemetry"], info["hot"].gemms_per_unit),
+                         ("4c", "sysfs", 4))
+        self.assertIn("P4c", info["cold_latency_match"]["source"])
+        info, refusal = e3.resolve_workload(write_report(self.p4b_report()), 4,
+                                            is_mock=False, config="4c")   # a P4b report
+        self.assertIsNone(info)
+        self.assertIn("P4c", refusal)
+
     def test_plain_configurations_report_full_telemetry(self):
         info, _ = self.resolve(make_report())
         self.assertEqual((info["config"], info["telemetry"]), ("4", "full"))

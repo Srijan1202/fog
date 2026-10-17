@@ -15,7 +15,7 @@
 # 6 INTERVENTION REQUIRED / leftovers / identity, boot or window problem.
 {
 # BEGIN SITE CONFIG
-RUN=wv-p4b-20261017-02
+RUN=wv-p4c-20261017-01
 B0=049f6578-3b7a-4b72-b36d-cf171d5f447c
 PROJECT="$HOME/tdas-pilot"
 OUT=results/workload_validation

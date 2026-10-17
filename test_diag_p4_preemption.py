@@ -279,6 +279,18 @@ class EndToEndMock(unittest.TestCase):
         self.assertFalse(any(p.is_alive() for p in made[0].procs))
 
 
+class RestoresSignalHandlers(unittest.TestCase):
+    def test_handlers_restored_after_main(self):
+        import signal
+        before = (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGINT))
+        d = tempfile.mkdtemp(prefix="diag_sig_")
+        with contextlib.redirect_stdout(io.StringIO()):
+            dg.main(["--backend", "mock", "--report", _report(d), "--outdir",
+                     os.path.join(d, "run"), "--jobs-per-block", "2", "--warmup", "1"])
+        self.assertEqual((signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGINT)),
+                         before)
+
+
 class NeverSigkill(unittest.TestCase):
     def test_source_sends_no_signals_itself(self):
         with open(dg.__file__) as f:

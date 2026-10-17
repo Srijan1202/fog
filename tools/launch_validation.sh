@@ -18,13 +18,13 @@
 # monitoring not established; 5 token written but not acknowledged.
 {
 # BEGIN SITE CONFIG
-RUN=wv-p4b-20261017-02
+RUN=wv-p4c-20261017-01
 B0=049f6578-3b7a-4b72-b36d-cf171d5f447c
 HOST_EXPECTED=pi
 PROJECT="$HOME/tdas-pilot"
 OUT=results/workload_validation
 CAP=21600
-VALIDATOR_ARGS="--config 4b"
+VALIDATOR_ARGS="--config 4c"
 GRACE=30
 BARRIER_S=120
 EXIT_WAIT_S=30
@@ -40,14 +40,15 @@ LAUNCH_PATH=/usr/sbin:/usr/bin:/sbin:/bin
 LAUNCH_LANG=en_GB.UTF-8
 ARCHIVES="results/exp1_1core results/exp1_4core"
 EXPECTED_HASHES='
-1bccf2e899509f8d878c7f6cf380dfe548c0e44bb39d586b8f6b0242f6bd352b validate_workload.py
+69d9634e9297737af66b850483503280c975315cbcb2063010fb7db60d97fcb0 validate_workload.py
 aabc88f6f23de2be782ca727e473ce3a02b2bf3f1f602ad02a5fd75b217a3033 workload.py
 acc4d28a6f422fb22c307da3574e26efb3129610e73616bb49f7b719f9f454e3 monitor_guard.py
 31665b5a42dce04b1d97dc66be2df7fc44cba97a7c72f285cad53beb2f59a285 runner.py
 d9df2f74772c9bd0ac0cc8204f59fb97088df3744dbc16048e6eb4e7ae52c9bc sensors.py
 05ab24e5ea4c8bad9e356990328a9b1b4529c1f40d95b08f73471b0d28ece864 PREREG_workload_validation.md
 7fc6fa01597e8808069b1ad1f84dc2929e55e89575616698d35be39a6c778049 PREREG_workload_validation_ADDENDUM_P4b.md
-15adfeeb21b6fa44a857e5172066a1adeba92ad69be8376e8d1c7a283ebe4eba tools/validation_monitor.sh
+bb39f9313b4bb9f1882896c2fd946dc0c5e348275888c216ea7771671bd1a724 PREREG_workload_validation_ADDENDUM_P4c.md
+1a98cdc1d52dc44143a1f701a1bebb61ccf562e8d4a0b5c50016b4b95f0cd765 tools/validation_monitor.sh
 33fc0af9684cf8723686ca7d4e0a35812e22f23b2557afc1a189ec233adeb90f results/exp1_1core/SHA256SUMS
 42d58faf87a17ee703ffbdc502807f366f39d3b2de00cb36f4bad6308a3106f7 results/exp1_1core/LABEL.txt
 22dc81d8c9277bcbe8921421909f090c2ceb496035a210ea7da685f860004af6 results/exp1_4core/SHA256SUMS
@@ -60,8 +61,8 @@ die() { echo "ABORT: $*"; echo "== NOTHING LAUNCHED"; exit 3; }
 st() { local n=$1 s; s=$(cat "/proc/$2/stat" 2>/dev/null) || return 1; s=${s##*) }; set -- $s; eval "echo \${$n}"; }   # field after "pid (comm)": 1=state 4=session 20=start
 case "$-" in *i*|*m*) die "launching shell is interactive or has job control";; esac
 cd "$PROJECT" || die "cannot cd to $PROJECT"
-VARGS=${VALIDATOR_ARGS:-}       # site config; empty = the original validation, "--config 4b" = P4b
-case "$VARGS" in ""|"--config 4b") ;; *) die "VALIDATOR_ARGS must be empty or '--config 4b' (got: $VARGS)";; esac
+VARGS=${VALIDATOR_ARGS:-}       # site config; empty = the original validation, "--config 4b|4c" = P4b|P4c
+case "$VARGS" in ""|"--config 4b"|"--config 4c") ;; *) die "VALIDATOR_ARGS must be empty, '--config 4b' or '--config 4c' (got: $VARGS)";; esac
 
 state_problem() {   # prints a reason if the host is not in the required state; nothing if OK
   [ "$(hostname)" = "$HOST_EXPECTED" ] || { echo "hostname $(hostname)"; return; }

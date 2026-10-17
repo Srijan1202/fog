@@ -516,6 +516,44 @@ class P4bConfiguration(unittest.TestCase):
         self.assertTrue(all(i["spec"].gemms_per_unit == 1 for c in fx.calls for i in c["plan"]))
 
 
+class P4cConfiguration(unittest.TestCase):
+    """PREREG_workload_validation_ADDENDUM_P4c.md: P4b's job design (as amended)
+    under the fork-free watchdog; its own label and report key."""
+
+    def test_p4c_is_p4b_with_its_own_label(self):
+        self.assertEqual(vw.P4C, {**vw.P4B, "label": "P4c"})
+        self.assertEqual((vw.config_key(vw.P4B), vw.config_key(vw.P4C)), ("4b", "4c"))
+        self.assertEqual(vw.FOUR_CORE["4c"][1], (vw.P4B_ADDENDUM, vw.P4C_ADDENDUM,
+                                                 "tools/validation_monitor.sh"))
+
+    def test_addendum_states_the_design_and_pins_the_watchdog(self):
+        with open(os.path.join(os.path.dirname(vw.__file__), vw.P4C_ADDENDUM)) as f:
+            doc = f.read()
+        for s in ("10 P=4 UNIT jobs of 12 units each", "4 consecutive 128×128 float32 GEMMs",
+                  "1a98cdc1d52dc44143a1f701a1bebb61ccf562e8d4a0b5c50016b4b95f0cd765",
+                  "P = 4 column", "A REJECTED P4c is final", 'VALIDATOR_ARGS="--config 4c"'):
+            self.assertIn(s, doc)
+
+    def test_complete_p4c_run_is_recorded_as_p4c(self):
+        fx = FakeExec()
+        rep = vw.run_p4b(fx, vw.Store(None), p4b=vw.P4C, log=quiet)
+        self.assertEqual((rep["overall"], rep["config_set"], sorted(rep["configs"])),
+                         ("COMPLETE", "P4c", ["4c"]))
+        c = rep["configs"]["4c"]
+        self.assertEqual((c["status"], c["config"], c["frozen"]["params_id"]),
+                         (vw.ACCEPTED, "P4c", "P4c-F1"))
+        self.assertEqual(c["frozen"]["gemms_per_unit"], 4)
+        self.assertTrue(all(i.startswith(("V0", "P4c-")) for i in fx.ids()))
+
+    def test_interrupt_in_p4c_is_incomplete(self):
+        rep = vw.new_report_p4b(vw.P4C)
+        with self.assertRaises(KeyboardInterrupt):
+            vw.run_p4b(FakeExec(interrupt_at="P4c-A1-e1"), vw.Store(None), p4b=vw.P4C,
+                       log=quiet, report=rep)
+        self.assertEqual(rep["configs"]["4c"]["status"], vw.INCOMPLETE)
+        self.assertIn("during P4c", rep["interrupted"])
+
+
 class FakeBackend:
     """Scripted sensor backend. Each *_fn gets the 1-based read count."""
     name = "fakehw"
@@ -848,6 +886,18 @@ class Main(unittest.TestCase):
         self.assertEqual(sorted(doc["sha256"]), sorted(vw.HASHED_FILES + [vw.P4B_ADDENDUM]))
         gb.assert_not_called()
         self.pool_boom.assert_not_called()
+        self.assertFalse(os.path.exists(self.out))
+
+    def test_p4c_plan_records_both_addenda_and_the_watchdog(self):
+        gb = mock.Mock(side_effect=AssertionError("no sensor may be read"))
+        with mock.patch.object(vw.sensors, "get_backend", gb):
+            rc, out = self.call(["--plan", "--config", "4c", "--outdir", self.out])
+        self.assertEqual(rc, 0)
+        doc = json.loads(out)
+        self.assertEqual(doc["p4c"], vw.P4C)
+        self.assertEqual(sorted(doc["sha256"]), sorted(vw.HASHED_FILES + [
+            vw.P4B_ADDENDUM, vw.P4C_ADDENDUM, "tools/validation_monitor.sh"]))
+        gb.assert_not_called()
         self.assertFalse(os.path.exists(self.out))
 
     def test_mock_backend_is_refused(self):

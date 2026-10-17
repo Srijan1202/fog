@@ -195,6 +195,7 @@ def main(argv=None):
         print(f"refused: {args.outdir} exists; refusing to overwrite")
         return 2
     temp = (lambda: 45.0) if is_mock else read_sysfs_temp
+    old_handlers = (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGINT))
     signal.signal(signal.SIGTERM, _sigterm)
 
     jobs, tele, blocks = [], [], []
@@ -292,6 +293,8 @@ def main(argv=None):
     if unstopped:
         print(f"  INTERVENTION REQUIRED: workers still alive after one SIGTERM: {unstopped}")
     print(f"wrote {args.outdir}/diag.*")
+    signal.signal(signal.SIGTERM, old_handlers[0])     # save done: restore the caller's handlers
+    signal.signal(signal.SIGINT, old_handlers[1])
     return 130 if interrupted else (1 if unstopped else 0)
 
 

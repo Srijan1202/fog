@@ -239,6 +239,18 @@ class ForkFreePollerP4c(unittest.TestCase):
             self.assertRegex(f.readline(), r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d +\d+\.\d   uv=")
 
 
+class RestoresSignalHandlers(unittest.TestCase):
+    def test_handlers_restored_after_main(self):
+        import signal
+        before = (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGINT))
+        d = tempfile.mkdtemp(prefix="stalls_sig_")
+        with contextlib.redirect_stdout(io.StringIO()):
+            ds.main(["--backend", "mock", "--report", _report(d), "--outdir",
+                     os.path.join(d, "run"), "--pairs-per-block", "1", "--poll-s", "0.01"])
+        self.assertEqual((signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGINT)),
+                         before)
+
+
 class NeverSignalsItself(unittest.TestCase):
     def test_source_sends_no_signals(self):
         with open(ds.__file__) as f:

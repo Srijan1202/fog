@@ -86,9 +86,9 @@ def resolve_workload(report_path, P, is_mock, config=None):
     Real hardware: only parameters frozen by a workload validation whose
     configuration P is ACCEPTED may be used, and only with the same
     workload.py that validation measured. Anything else is a refusal.
-    config="4b" selects configuration P4b (P=4, four-GEMM units,
-    PREREG_workload_validation_ADDENDUM_P4b.md); its jobs must then run under
-    P4b's telemetry scheme (info["telemetry"] == "sysfs").
+    config="4b" or "4c" selects configuration P4b or P4c (P=4, four-GEMM units,
+    PREREG_workload_validation_ADDENDUM_P4b.md / _P4c.md); their jobs must then
+    run under that telemetry scheme (info["telemetry"] == "sysfs").
     Mock: simulated jobs, never confirmatory, no validation needed.
     """
     import validate_workload as vw
@@ -106,14 +106,15 @@ def resolve_workload(report_path, P, is_mock, config=None):
                       "not COMPLETE" + (f" ({rep['reason']})" if rep.get("reason") else ""))
     if rep.get("interrupted"):
         return None, f"workload validation was interrupted ({rep['interrupted']})"
-    if config not in (None, "4b"):
+    four = {"4b": vw.P4B, "4c": vw.P4C}.get(config)
+    if config is not None and four is None:
         return None, f"unknown workload configuration {config!r}"
-    if config == "4b" and P != 4:
-        return None, "configuration 4b is a P=4 configuration (--parallel 4)"
+    if four is not None and P != 4:
+        return None, f"configuration {config} is a P=4 configuration (--parallel 4)"
     key = config or str(P)
     cfg = (rep.get("configs") or {}).get(key) or {}
     if cfg.get("status") != vw.ACCEPTED:
-        return None, (f"workload validation for {'P4b' if config else f'P={P}'} is "
+        return None, (f"workload validation for {four['label'] if four else f'P={P}'} is "
                       f"{cfg.get('status', 'missing')}, not {vw.ACCEPTED}"
                       + (f" ({cfg['reason']})" if cfg.get("reason") else ""))
     ev, frozen = cfg.get("evaluation") or {}, cfg.get("frozen") or {}
@@ -128,7 +129,7 @@ def resolve_workload(report_path, P, is_mock, config=None):
         return None, "frozen parameters are stale or incomplete"
     if frozen["P"] != P:
         return None, f"frozen parameters are for P={frozen['P']}, not P={P}"
-    want_g = vw.P4B["gemms_per_unit"] if config == "4b" else 1
+    want_g = four["gemms_per_unit"] if four else 1
     if int(frozen.get("gemms_per_unit", 1)) != want_g:
         return None, (f"frozen parameters have {frozen.get('gemms_per_unit', 1)} GEMMs "
                       f"per unit, configuration {key} needs {want_g}")
@@ -139,7 +140,7 @@ def resolve_workload(report_path, P, is_mock, config=None):
     hot, cool = wl.make_job_specs(frozen)
     vals = ev.get("values", {})
     return ({"accepted": True, "mock": False, "hot": hot, "cool": cool,
-             "config": key, "telemetry": vw.P4B["telemetry"] if config == "4b" else "full",
+             "config": key, "telemetry": four["telemetry"] if four else "full",
              "frozen": frozen, "validation_run": rep.get("run_id"),
              "report": report_path,
              "cold_latency_match": {
@@ -150,7 +151,7 @@ def resolve_workload(report_path, P, is_mock, config=None):
                  "gap_class": gap.get("class"),
                  "matched": True,
                  "source": f"workload validation {rep.get('run_id')} "
-                           f"({'P4b' if config else f'P={P}'})"}},
+                           f"({four['label'] if four else f'P={P}'})"}},
             None)
 
 
@@ -253,7 +254,7 @@ def main():
                          "validated configuration (required on real hardware)")
     ap.add_argument("--workload-validation", default=None,
                     help="report.json from validate_workload.py")
-    ap.add_argument("--workload-config", choices=("4b",), default=None,
+    ap.add_argument("--workload-config", choices=("4b", "4c"), default=None,
                     help="4b = configuration P4b (with --parallel 4), validated by "
                          "validate_workload.py --config 4b")
     ap.add_argument("--hz", type=float, default=5.0)
