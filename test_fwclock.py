@@ -59,5 +59,44 @@ class ArmClockMailboxTests(unittest.TestCase):
             fc.ArmClockMailbox(opener=no_open)
 
 
+class ClockSamplerTests(unittest.TestCase):
+    def test_gaps_are_jittered_within_bounds_and_seeded(self):
+        a = fc.ClockSampler(None, hz=1.0, jitter=0.5, seed=0)
+        gaps = [a.next_gap() for _ in range(2000)]
+        self.assertTrue(all(0.5 <= g <= 1.5 for g in gaps))
+        self.assertLess(min(gaps), 0.52)
+        self.assertGreater(max(gaps), 1.48)
+        self.assertAlmostEqual(sum(gaps) / len(gaps), 1.0, delta=0.02)
+        b = fc.ClockSampler(None, hz=1.0, jitter=0.5, seed=0)
+        self.assertEqual(gaps[:10], [b.next_gap() for _ in range(10)])
+        self.assertTrue(all(g == 0.1 for g in
+                            (fc.ClockSampler(None, hz=10.0, jitter=0.0).next_gap()
+                             for _ in range(5))))
+
+    def test_records_reads_and_failures(self):
+        vals = iter([1800.0, None])
+
+        class Clock:
+            def read(self):
+                v = next(vals, "boom")
+                if v == "boom":
+                    raise OSError("gone")
+                return v
+        import time
+        s = fc.ClockSampler(Clock(), hz=200.0, jitter=0.0).start()
+        time.sleep(0.1)
+        out = s.stop()
+        self.assertGreaterEqual(len(out), 3)
+        self.assertEqual([v for _, _, v in out[:3]], [1800.0, None, None])
+        self.assertTrue(all(t0 <= t1 for t0, t1, _ in out))
+        self.assertFalse(s._t.is_alive())
+
+    def test_bad_parameters(self):
+        with self.assertRaises(ValueError):
+            fc.ClockSampler(None, hz=1.0, jitter=1.0)
+        with self.assertRaises(ValueError):
+            fc.ClockSampler(None, hz=0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

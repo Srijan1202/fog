@@ -203,6 +203,121 @@ def classify_g1(e1, e2):
             "completed exp1 at full load observed no throttle knee")
 
 
+# ---------------------------------------------------------------------------
+# G2 (P1) - Amendment A4 (approved 2026-10-18, AMENDMENT_A4_exp2.md): s(T) is
+# measured under the job stream's own four-core load (P4c HOT jobs, two ramps).
+# ---------------------------------------------------------------------------
+G2_RULE = {"bin_c": 2.0, "min_jobs": 20, "n_boot": 2000, "seed": 0, "cover_bins": 2,
+           "below_knee_c": 10.0, "min_clock_readable": 0.95, "config": "4c"}
+
+
+def g2_bins(jobs, rule=G2_RULE):
+    """2 C bins per ramp from completed jobs ({"ramp", "temp_before_c",
+    "latency_ms"}); bins with fewer than min_jobs jobs are dropped."""
+    groups = {}
+    for j in jobs:
+        t, lat = j.get("temp_before_c"), j.get("latency_ms")
+        if not (_num(t) and _num(lat)):
+            continue
+        lo = math.floor(t / rule["bin_c"]) * rule["bin_c"]
+        groups.setdefault((j["ramp"], lo), []).append((t, lat))
+    out = []
+    for (ramp, lo), v in sorted(groups.items()):
+        if len(v) < rule["min_jobs"]:
+            continue
+        out.append({"ramp": ramp, "bin_lo_c": lo, "n": len(v),
+                    "temp_median_c": float(np.median([x[0] for x in v])),
+                    "latency_median_ms": float(np.median([x[1] for x in v]))})
+    return out
+
+
+def g2_slope(bins, rule=G2_RULE):
+    """OLS slope of bin-median latency on bin-median temperature, with a
+    bootstrap over (ramp, bin) clusters (each bin resampled whole). None when
+    fewer than 3 bins or no temperature spread."""
+    if len(bins) < 3:
+        return None
+    x = np.array([b["temp_median_c"] for b in bins], float)
+    y = np.array([b["latency_median_ms"] for b in bins], float)
+    if np.ptp(x) == 0:
+        return None
+    slope = float(np.polyfit(x, y, 1)[0])
+    rng = np.random.default_rng(rule["seed"])
+    boots = []
+    for _ in range(rule["n_boot"]):
+        idx = rng.integers(0, len(bins), len(bins))
+        if np.ptp(x[idx]) == 0:
+            continue
+        boots.append(np.polyfit(x[idx], y[idx], 1)[0])
+    if not boots:
+        return None
+    lo, hi = np.percentile(boots, [2.5, 97.5])
+    return {"slope_ms_per_C": slope, "ci_lo": float(lo), "ci_hi": float(hi),
+            "n_bins": len(bins), "n_boot_used": len(boots)}
+
+
+def g2_invalid(e2, rule=G2_RULE):
+    """Why exp2 cannot decide G2 under A4 (None = valid)."""
+    if e2.get("amendment") != "A4":
+        return "exp2 record made before Amendment A4; it cannot decide G2"
+    if e2.get("abort_reason") or e2.get("interrupted"):
+        return f"exp2 aborted ({e2.get('abort_reason') or e2.get('interrupted')})"
+    if not e2.get("mock"):
+        wk = e2.get("workload") or {}
+        if not wk.get("accepted") or wk.get("config") != rule["config"]:
+            return "exp2 jobs are not from an ACCEPTED P4c workload validation"
+        if not e2.get("monitor"):
+            return "exp2 ran without verified supervision"
+        ck = e2.get("clock") or {}
+        n, ok = ck.get("reads"), ck.get("readable")
+        if not (_num(n) and n > 0 and _num(ok)) or ok / n < rule["min_clock_readable"]:
+            return (f"ARM clock readable in {ok} of {n} reads "
+                    f"(need >= {rule['min_clock_readable']:.0%})")
+    if e2.get("undervoltage"):
+        return "under-voltage during exp2; run not valid"
+    if not e2.get("jobs_complete"):
+        return "an exp2 job did not complete its planned units"
+    planned, done = e2.get("ramps_planned"), e2.get("ramps_completed")
+    if not (_num(planned) and planned >= 1 and done == planned):
+        return f"exp2 completed {done} of {planned} ramps"
+    knee = e2.get("g1_knee_c")
+    if not _num(knee):
+        return "exp2 recorded no G1 knee"
+    bins = e2.get("bins") or []
+    for r in range(int(planned)):
+        rb = [b for b in bins if b["ramp"] == r]
+        above = sum(1 for b in rb if b["temp_median_c"] >= knee)
+        below = sum(1 for b in rb if b["temp_median_c"] <= knee - rule["below_knee_c"])
+        if above < rule["cover_bins"] or below < rule["cover_bins"]:
+            return (f"ramp {r}: {above} kept bins at/above the knee ({knee:.1f} C) and "
+                    f"{below} at/below knee - {rule['below_knee_c']:.0f} C "
+                    f"(need {rule['cover_bins']} each)")
+    return None
+
+
+def classify_g2(e2, rule=G2_RULE):
+    """G2 (P1) under A4. Returns (state, slope_dict, reason):
+      NOT_TESTED    no exp2 data
+      INCONCLUSIVE  exp2 not a completed, valid A4 run (incl. pre-A4 records), too
+                    few bins, or the CI lies entirely below 0 (anomalous)
+      PASS          the 95 % CI of the slope lies above 0
+      FAIL          the CI includes 0"""
+    if e2 is None:
+        return "NOT_TESTED", None, "no exp2 data"
+    why = g2_invalid(e2, rule)
+    if why:
+        return "INCONCLUSIVE", None, why
+    sl = g2_slope(e2["bins"], rule)
+    if sl is None:
+        return "INCONCLUSIVE", None, "too few kept bins (or no temperature spread) for a slope"
+    if sl["ci_lo"] > 0:
+        return "PASS", sl, "service time rises with temperature (CI above 0)"
+    if sl["ci_hi"] < 0:
+        return ("INCONCLUSIVE", sl, "latency falls with temperature (CI below 0): "
+                "physically unexpected, treated as an artifact")
+    return "FAIL", sl, "CI includes 0: s(T) flat over the probed range"
+
+
 def overall_verdict(gates):
     """Map gate results to a verdict. Returns (verdict, failed_structural)."""
     hard_fail = [k for k in STRUCTURAL if gates.get(k) is False]
@@ -266,27 +381,24 @@ def main():
 
     # ---------------- GATE 2: s(T) not flat (P1) ----------------
     print("\n--- GATE 2 (P1): does service time depend on temperature? ---")
-    if not e2:
-        print("  no exp2 data")
-        gates["G2_sT"] = None
-        notes["G2_sT"] = "NOT TESTED: no exp2 data"
-    else:
-        sl = e2.get("slope")
-        rho = e2.get("spearman_temp_latency")
-        if sl:
-            print(f"  slope {sl['slope_ms_per_C']:+.3f} ms/C "
-                  f"[{sl['ci_lo']:+.3f}, {sl['ci_hi']:+.3f}]  rho={rho:+.3f}")
-            gates["G2_sT"] = bool(sl["excludes_zero"])
-            if sl["excludes_zero"]:
-                print("  PASS")
-            elif no_knee:
-                print("  FAIL: CI includes zero -> s(T) flat over the probed "
-                      "range (knee not established; see verdict)")
-            else:
-                print("  FAIL: CI includes zero -> s(T) flat -> TDAS DEAD")
+    g2, sl, why2 = classify_g2(e2)                     # Amendment A4
+    if sl:
+        print(f"  slope {sl['slope_ms_per_C']:+.3f} ms/C "
+              f"[{sl['ci_lo']:+.3f}, {sl['ci_hi']:+.3f}] over {sl['n_bins']} bins")
+    if g2 == "PASS":
+        print("  PASS")
+        gates["G2_sT"] = True
+    elif g2 == "FAIL":
+        gates["G2_sT"] = False
+        if no_knee:
+            print("  FAIL: CI includes zero -> s(T) flat over the probed "
+                  "range (knee not established; see verdict)")
         else:
-            gates["G2_sT"] = None
-            notes["G2_sT"] = "INCONCLUSIVE: exp2 metadata has no slope"
+            print("  FAIL: CI includes zero -> s(T) flat -> TDAS DEAD")
+    else:
+        print(f"  {g2}: {why2}")
+        gates["G2_sT"] = None
+        notes["G2_sT"] = f"{g2}: {why2}"
 
     # ---------------- GATE 3: cold-latency match (attack #7) -------
     print("\n--- GATE 3: are HOT and COOL indistinguishable when cold? ---")

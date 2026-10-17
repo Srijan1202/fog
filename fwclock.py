@@ -19,6 +19,10 @@ from __future__ import annotations
 import array
 import fcntl
 import os
+import threading
+import time
+
+import numpy as np
 
 VCIO = "/dev/vcio"
 IOCTL_MBOX_PROPERTY = (3 << 30) | (8 << 16) | (100 << 8) | 0   # _IOWR(100, 0, char *), 64-bit
@@ -55,3 +59,44 @@ class ArmClockMailbox:
 
     def __exit__(self, *exc):
         self.close()
+
+
+class ClockSampler:
+    """Reads `clock` (anything with read() -> MHz or None) in a thread at `hz` on
+    average and records (t_start, t_end, MHz or None) in monotonic time. Each gap
+    is period x U(1 - jitter, 1 + jitter) from a seeded generator, so the reads
+    cannot lock in phase with the job cadence (Amendment A4; the same sampler as
+    diag_p4_stalls.ClockReader in the stall control diag-stalls-20261018-03)."""
+
+    def __init__(self, clock, hz=1.0, jitter=0.5, seed=0):
+        if not hz > 0:
+            raise ValueError("hz must be > 0")
+        if not 0.0 <= jitter < 1.0:
+            raise ValueError("jitter must be in [0, 1)")
+        self.clock, self.period, self.jitter = clock, 1.0 / hz, jitter
+        self.rng = np.random.default_rng(seed)
+        self.samples, self._stop = [], threading.Event()
+        self._t = threading.Thread(target=self._loop, daemon=True)
+
+    def next_gap(self):
+        return self.period * (1.0 + self.jitter * (2.0 * self.rng.random() - 1.0))
+
+    def _loop(self):
+        while not self._stop.is_set():
+            t0 = time.monotonic()
+            try:
+                v = self.clock.read()
+            except Exception:                 # a telemetry thread never kills a run
+                v = None
+            self.samples.append((t0, time.monotonic(), v))
+            self._stop.wait(max(0.0, self.next_gap() - (time.monotonic() - t0)))
+
+    def start(self):
+        self._t.start()
+        return self
+
+    def stop(self):
+        self._stop.set()
+        if self._t.is_alive():
+            self._t.join(timeout=5.0)
+        return self.samples

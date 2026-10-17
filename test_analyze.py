@@ -59,12 +59,26 @@ E1_MOCK_FAIL = {"experiment": "exp1_thermal", "backend": "mock", "mock": True,
                 "cpu_util_heating": {"per_core_busy": [0.0] * 4,
                                      "avg_cores_busy": 0.0}}
 
-E2_PASS = {"slope": {"slope_ms_per_C": 0.8, "ci_lo": 0.5, "ci_hi": 1.1,
-                     "excludes_zero": True},
-           "spearman_temp_latency": 0.7, "knee_c": None}
-E2_FLAT = {"slope": {"slope_ms_per_C": 0.01, "ci_lo": -0.2, "ci_hi": 0.2,
-                     "excludes_zero": False},
-           "spearman_temp_latency": 0.05, "knee_c": None}
+def make_e2(slope_ms_per_c, knee=80.2, ramps=2, **over):
+    """A completed, valid Amendment A4 exp2 record: bin medians at 61..83 C in
+    every ramp (covers the knee and knee - 10 C), latency 196 ms + slope x
+    (T - 61) with a small fixed wobble."""
+    wobble = [0.3, -0.2, 0.1, -0.3, 0.2, 0.0, -0.1, 0.3, -0.2, 0.1, -0.3, 0.2]
+    bins = [{"ramp": r, "bin_lo_c": 60.0 + 2 * i, "n": 40, "temp_median_c": 61.0 + 2 * i,
+             "latency_median_ms": 196.0 + slope_ms_per_c * 2 * i + wobble[i]}
+            for r in range(ramps) for i in range(12)]
+    e2 = {"experiment": "exp2_curve", "amendment": "A4", "backend": "raspberrypi",
+          "mock": False, "workload": {"accepted": True, "config": "4c"},
+          "monitor": {"fake": True}, "clock": {"reads": 1500, "readable": 1500},
+          "undervoltage": False, "jobs_complete": True, "ramps_planned": ramps,
+          "ramps_completed": ramps, "g1_knee_c": knee, "bins": bins,
+          "abort_reason": None, "interrupted": None, "knee_c": None}
+    e2.update(over)
+    return e2
+
+
+E2_PASS = make_e2(0.8)
+E2_FLAT = make_e2(0.0)
 
 
 def make_e3(moves=True):
@@ -304,6 +318,82 @@ class Exp2IsSupportingEvidenceOnly(unittest.TestCase):
         self.assertIn("79.0 C", an.exp2_knee_support(E2_KNEE))
         self.assertIsNone(an.exp2_knee_support(E2_PASS))
         self.assertIsNone(an.exp2_knee_support(None))
+
+
+class G2AmendmentA4(unittest.TestCase):
+    """AMENDMENT_A4_exp2.md: 2 C bins per ramp (>= 20 jobs), OLS slope of bin
+    medians, (ramp, bin) cluster bootstrap; validity like A1."""
+
+    def test_bins_group_by_ramp_and_2c_and_drop_small_bins(self):
+        jobs = ([{"ramp": 0, "temp_before_c": 60.4 + 0.01 * k, "latency_ms": 196.0 + k % 3}
+                 for k in range(25)]
+                + [{"ramp": 0, "temp_before_c": 62.5, "latency_ms": 199.0}] * 19   # 19 < 20
+                + [{"ramp": 1, "temp_before_c": 61.9, "latency_ms": 200.0}] * 20
+                + [{"ramp": 1, "temp_before_c": None, "latency_ms": 200.0}])
+        bins = an.g2_bins(jobs)
+        self.assertEqual([(b["ramp"], b["bin_lo_c"], b["n"]) for b in bins],
+                         [(0, 60.0, 25), (1, 60.0, 20)])
+        self.assertEqual(bins[0]["latency_median_ms"], 197.0)
+
+    def test_rising_flat_and_falling(self):
+        self.assertEqual(an.classify_g2(make_e2(0.8))[0], "PASS")
+        state, sl, _ = an.classify_g2(make_e2(0.0))
+        self.assertEqual(state, "FAIL")
+        self.assertLess(sl["ci_lo"], 0)
+        self.assertGreater(sl["ci_hi"], 0)
+        state, sl, why = an.classify_g2(make_e2(-0.8))
+        self.assertEqual(state, "INCONCLUSIVE")
+        self.assertIn("falls", why)
+
+    def test_bootstrap_is_reproducible(self):
+        a = an.g2_slope(make_e2(0.3)["bins"])
+        b = an.g2_slope(make_e2(0.3)["bins"])
+        self.assertEqual(a, b)
+        self.assertEqual((a["n_bins"], a["n_boot_used"]), (24, 2000))
+
+    def test_every_validity_rule_gives_inconclusive_never_fail(self):
+        flat = make_e2(0.0)
+        cases = {
+            "pre-A4 record": {**E2_PASS, "amendment": None},
+            "aborted": {**flat, "abort_reason": "watchdog lost"},
+            "interrupted": {**flat, "interrupted": "interrupted (SIGTERM)"},
+            "not accepted": {**flat, "workload": {"accepted": False, "config": "4c"}},
+            "P4b jobs": {**flat, "workload": {"accepted": True, "config": "4b"}},
+            "unsupervised": {**flat, "monitor": None},
+            "clock 94%": {**flat, "clock": {"reads": 100, "readable": 94}},
+            "under-voltage": {**flat, "undervoltage": True},
+            "job incomplete": {**flat, "jobs_complete": False},
+            "one ramp of two": {**flat, "ramps_completed": 1},
+            "no knee": {**flat, "g1_knee_c": None},
+            "knee above every bin": {**flat, "g1_knee_c": 90.0},
+            "too few bins": {**flat, "bins": flat["bins"][:2]},
+        }
+        for name, e2 in cases.items():
+            with self.subTest(case=name):
+                self.assertEqual(an.classify_g2(e2)[0], "INCONCLUSIVE")
+
+    def test_clock_readability_boundary_is_inclusive(self):
+        self.assertEqual(an.classify_g2(make_e2(0.8, clock={"reads": 100, "readable": 95}))[0],
+                         "PASS")
+
+    def test_coverage_is_per_ramp(self):
+        e2 = make_e2(0.8)
+        e2["bins"] = [b for b in e2["bins"] if not (b["ramp"] == 1 and b["temp_median_c"] > 80)]
+        state, _, why = an.classify_g2(e2)
+        self.assertEqual(state, "INCONCLUSIVE")
+        self.assertIn("ramp 1: 0 kept bins at/above the knee", why)
+
+    def test_mock_records_skip_hardware_only_checks(self):
+        e2 = make_e2(0.8, mock=True, backend="mock", workload={}, monitor=None, clock={})
+        self.assertEqual(an.classify_g2(e2)[0], "PASS")
+
+    def test_not_tested_without_exp2(self):
+        self.assertEqual(an.classify_g2(None)[0], "NOT_TESTED")
+
+    def test_falling_latency_is_never_a_kill_end_to_end(self):
+        result, out = run(E1_KNEE, make_e2(-0.8), make_e3(True))
+        self.assertNotEqual(result["verdict"], "KILL")
+        self.assertIn("INCONCLUSIVE: latency falls", out)
 
 
 class OverallVerdict(unittest.TestCase):
