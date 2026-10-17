@@ -197,6 +197,8 @@ Attacks **2, 7, 8, 9** are the real threats. All four are settled by this pilot.
 
 **Amendment A3 (2026-10-16, before any Experiment 3 data and before the next Experiment 1 run):** On the Raspberry Pi, the Day-1 knee is read from the firmware ARM clock (`vcgencmd measure_clock arm`), not from Linux `scaling_cur_freq`. An instrument check showed that `scaling_cur_freq` stays at 1800 MHz while the firmware lowers the clock. The 98 % rule is unchanged. A Pi Day-1 run counts for P4 only if it recorded that clock, with at most 5 % of readings missing. Earlier runs keep their recorded outcomes but cannot decide P4. Details are in README.md, Amendment A3.
 
+**Amendment A4 (2026-10-18, before any Experiment 2 or Experiment 3 data):** On this Pi the firmware stops throttling within 0.15 s of load ending, so Day-1d s(T) is measured under the job stream's own four-core load: the accepted P4c HOT job, back to back in two ramps, with a fork-free 85 °C watchdog. G2 is the slope of 2 °C bin-median latency on temperature, with a (ramp, bin) cluster bootstrap. It counts only from a valid run that covers the knee; otherwise it is INCONCLUSIVE, never FAIL. Details are in README.md, Amendment A4.
+
 **On thresholds:** deliberately no "≥20% improvement" bar. Report effect sizes with CIs and let magnitude speak. A well-characterized 8% tail improvement with a clean mechanism is a better paper than a hand-waved 30%.
 
 ---

@@ -393,6 +393,28 @@ On the Pi, the throttle knee is read from the firmware ARM clock.
   flags, so it is not blind. Exp 2's knee stays supporting evidence only.
   Exp 3's `time_throttled_s` stays descriptive, and no gate uses it.
 
+### Amendment A4 (2026-10-18, before any Experiment 2 or Experiment 3 data)
+Experiment 2 measures s(T) under its own four-core load.
+- **Why.** On this Pi the firmware stops throttling within 0.15 s of load ending, so "pre-heat, then probe"
+  never sees a throttled probe. The original deadline probes cannot show throttling at all. And one busy
+  core reaches only about 65 °C, below the 80.8 °C knee.
+- **Measurement.**
+  - P4c's accepted HOT job, back to back on four cores: two 12-minute ramps from idle + 3 °C.
+  - Per job: temperature before dispatch and latency. The ARM clock is read in-process during load through
+    the firmware mailbox, starting no process, about once per second with jitter.
+  - Supervision as in Experiment 1, with a fork-free 85 °C watchdog.
+- **G2.** The slope of bin-median latency on temperature, in 2 °C bins per ramp with at least 20 jobs per
+  bin, with a cluster bootstrap over (ramp, bin). PASS if the 95 % CI is above 0, FAIL if it includes 0,
+  INCONCLUSIVE if it is below 0.
+- **Validity (as A1 does for G1).** G2 counts only from a completed, valid run: supervised, P4c jobs, a G1
+  knee, ≥ 2 bins at or above the knee and ≥ 2 bins at or below knee − 10 °C in each ramp, no
+  under-voltage, ARM clock ≥ 95 % readable. Otherwise G2 is INCONCLUSIVE, never FAIL. Pre-A4 exp2 records are
+  INCONCLUSIVE.
+- **Experiment 3** runs P4c jobs under P4c's validated telemetry: the sysfs logger and the between-job flag
+  read. It makes no live ARM-clock reads, because its outcome is tail latency. (The stall control
+  `diag-stalls-20261018-03` measured about +0.35 ms on read-overlapped jobs; see `AMENDMENT_A4_exp2.md`.)
+Details, checks and evidence: `AMENDMENT_A4_exp2.md`.
+
 ---
 
 ## Expected confounders
