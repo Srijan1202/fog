@@ -164,6 +164,54 @@ class EndToEndMock(unittest.TestCase):
         self.assertEqual((rc, os.listdir(out)), (2, []))
 
 
+class WatchdogMode(unittest.TestCase):
+    def test_poll_intervals_and_overlap(self):
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "poller.log")
+        with open(p, "w") as f:
+            f.write("100.00 start\n100.05 end\n105.10 start\n105.16 end\n110.20 start\n")
+        iv = ds.poll_intervals(p, offset=100.0)            # uptime - monotonic
+        self.assertEqual([tuple(round(x, 2) for x in i) for i in iv], [(0.0, 0.05), (5.1, 5.16)])
+        jobs = [{"t0_mono": -0.1, "t1_mono": 0.02}, {"t0_mono": 1.0, "t1_mono": 1.2},
+                {"t0_mono": 5.15, "t1_mono": 5.35}]
+        ds.mark_overlap(jobs, iv)
+        self.assertEqual([j["poll_overlap"] for j in jobs], [True, False, True])
+
+    def test_summary_splits_stalls_by_overlap(self):
+        jobs = [{**_job(0, "HOT", 197.0, [15.0] * 13, cond="W"), "poll_overlap": False}
+                for _ in range(8)]
+        jobs += [{**_job(0, "HOT", 240.0, [15.0] * 12 + [30.0], cond="W"), "poll_overlap": True},
+                 {**_job(0, "HOT", 197.0, [15.0] * 13, cond="W"), "poll_overlap": True}]
+        s = ds.summarize(ds.mark_stalls(jobs), ds.MODES["watchdog"][1])["W"]
+        self.assertEqual((s["hot_jobs_poll_overlap"], s["stalls_poll_overlap"],
+                          s["hot_jobs_no_overlap"], s["stalls_no_overlap"]), (2, 1, 8, 0))
+
+    def test_watchdog_mode_end_to_end_poller_stops_without_signals(self):
+        d = tempfile.mkdtemp(prefix="stalls_wd_")
+        out = os.path.join(d, "run")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = ds.main(["--backend", "mock", "--report", _report(d), "--outdir", out,
+                          "--mode", "watchdog", "--pairs-per-block", "4", "--poll-s", "0.01"])
+        self.assertEqual(rc, 0, buf.getvalue())
+        with open(os.path.join(out, "stalls.meta.json")) as f:
+            m = json.load(f)
+        self.assertTrue(m["complete"])
+        self.assertEqual(m["mode"], "watchdog")
+        self.assertEqual([b["condition"] for b in m["blocks"]], list(ds.MODES["watchdog"][0]))
+        self.assertGreaterEqual(m["poll_iterations"], 8)            # at least one per W block
+        self.assertEqual(m["poller_unstopped"], [])
+        self.assertIn("hot_jobs_poll_overlap", m["summary"]["W"])
+        with open(os.path.join(out, "stalls.jobs.jsonl")) as f:
+            jobs = [json.loads(x) for x in f]
+        self.assertTrue(all("throttled_after" in j and "poll_overlap" in j and
+                            j["t1_mono"] > j["t0_mono"] for j in jobs))
+        self.assertTrue(any(j["poll_overlap"] for j in jobs if j["condition"] == "W"))
+        self.assertFalse(any(j["poll_overlap"] for j in jobs if j["condition"] == "N"))
+        self.assertEqual(sorted(f for f in os.listdir(out) if f.endswith(".stop")),
+                         [f"poller{i}.stop" for i in (0, 11, 12, 15, 3, 4, 7, 8)])
+
+
 class NeverSignalsItself(unittest.TestCase):
     def test_source_sends_no_signals(self):
         with open(ds.__file__) as f:

@@ -14,6 +14,11 @@ records what else ran on the Pi:
 Two conditions are interleaved F N N F x 4:
   F  P4b's scheme: one `vcgencmd get_throttled` between jobs (validation telemetry)
   N  no flag read between jobs
+With --mode watchdog the blocks are W N N W x 4 instead: W runs a poller with the
+external watchdog's 5 s commands (tools/validation_monitor.sh: pgrep, cat,
+vcgencmd | cut, echo | bc, date, sleep), N none; every job keeps P4b's
+between-job flag read, and each job is marked if a poller iteration overlapped
+it. The poller stops on a stop file (no signal).
 Both use P4b's 5 Hz sysfs-only logger during jobs. Snapshots are taken between
 jobs, outside every latency measurement. No acceptance decision uses this; it
 only informs the next configuration (P4c), which is pre-registered and
@@ -52,6 +57,80 @@ import workload as wl
 ORDER = ("F", "N", "N", "F") * 4
 CONDITIONS = {"F": "vcgencmd get_throttled between jobs (P4b scheme)",
               "N": "no flag read between jobs"}
+# --mode watchdog: does the external watchdog's 5 s poll (tools/validation_monitor.sh:
+# pgrep, cat, vcgencmd | cut, echo | bc, date, sleep - a burst of process starts)
+# stall the jobs? W blocks run a poller with the same commands; N blocks none.
+# Both keep P4b's between-job flag read.
+MODES = {"telemetry": (ORDER, CONDITIONS),
+         "watchdog": (("W", "N", "N", "W") * 4,
+                      {"W": "watchdog-like poller every 5 s (validation_monitor.sh loop commands)",
+                       "N": "no poller"})}
+POLLER = r'''
+STOP=$1; LOG=$2; VP=$3
+while [ ! -e "$STOP" ]; do
+  echo "$(cut -d' ' -f1 /proc/uptime) start" >> "$LOG"
+  for c in $(pgrep -P "$VP" 2>/dev/null); do cat "/proc/$c/stat" > /dev/null 2>&1; done
+  T=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null)
+  TH=$(vcgencmd get_throttled 2>/dev/null | cut -d= -f2)
+  printf '%6.1f' "$(echo "${T:-0}/1000" | bc -l)" > /dev/null
+  [ $(( $(date +%s) - 0 )) -ge 0 ]
+  echo "$(cut -d' ' -f1 /proc/uptime) end" >> "$LOG"
+  for i in 1 2 3 4 5; do [ -e "$STOP" ] && break; sleep 1; done
+done
+'''
+
+
+def start_poller(stop, log, ppid):
+    import subprocess
+    return subprocess.Popen(["bash", "-c", POLLER, "poller", stop, log, str(ppid)],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+
+
+def stop_poller(proc, stop, wait_s=12.0):
+    """Ask the poller to stop (stop file, no signal). Returns its pid if it is
+    still alive after wait_s, else None."""
+    import subprocess
+    with open(stop, "w"):
+        pass
+    try:
+        proc.wait(timeout=wait_s)
+        return None
+    except subprocess.TimeoutExpired:
+        return proc.pid
+
+
+def poll_intervals(log, offset):
+    """[(start, end)] of poller iterations in time.monotonic() seconds
+    (offset = /proc/uptime - time.monotonic(), measured at start)."""
+    out, start = [], None
+    try:
+        with open(log) as f:
+            for ln in f:
+                parts = ln.split()
+                if len(parts) != 2:
+                    continue
+                t = float(parts[0]) - offset
+                if parts[1] == "start":
+                    start = t
+                elif parts[1] == "end" and start is not None:
+                    out.append((start, t))
+                    start = None
+    except OSError:
+        pass
+    return out
+
+
+def mark_overlap(jobs, intervals):
+    """job["poll_overlap"]: a poller iteration overlapped the job's [t0, t1]."""
+    for j in jobs:
+        j["poll_overlap"] = any(s < j["t1_mono"] and e > j["t0_mono"] for s, e in intervals)
+    return jobs
+
+
+def _uptime():
+    with open("/proc/uptime") as f:
+        return float(f.read().split()[0])
 PROC = "/proc"
 MIN_TASK_MS = 0.2              # per-job foreign thread CPU below this is not listed
 
@@ -169,11 +248,12 @@ def mark_stalls(jobs, lat_factor=1.05, unit_factor=1.5):
     return jobs
 
 
-def summarize(jobs):
+def summarize(jobs, conds=CONDITIONS):
     """Per condition: stall rate, and mean foreign CPU per thread name in stall
-    vs other HOT jobs (the ranking that points at the cause)."""
+    vs other HOT jobs (the ranking that points at the cause). With poller data,
+    also the stall rate of HOT jobs that a poller iteration overlapped vs not."""
     out = {}
-    for c in CONDITIONS:
+    for c in conds:
         hot = [j for j in jobs if j["condition"] == c and j["class"] == "HOT"]
         st = [j for j in hot if j.get("stall")]
         ok = [j for j in hot if not j.get("stall")]
@@ -196,6 +276,12 @@ def summarize(jobs):
                   "foreign_ms_other_mean": round(float(np.mean([j["during"]["foreign_ms"]
                                                                 for j in ok])), 3) if ok else None,
                   "excess_by_thread_in_stalls": excess[:10]}
+        if any("poll_overlap" in j for j in hot):
+            ov = [j for j in hot if j.get("poll_overlap")]
+            no = [j for j in hot if not j.get("poll_overlap")]
+            out[c].update(
+                hot_jobs_poll_overlap=len(ov), stalls_poll_overlap=sum(1 for j in ov if j.get("stall")),
+                hot_jobs_no_overlap=len(no), stalls_no_overlap=sum(1 for j in no if j.get("stall")))
     return out
 
 
@@ -217,7 +303,11 @@ def main(argv=None):
     ap.add_argument("--poll-s", type=float, default=2.0)
     ap.add_argument("--max-load-s", type=float, default=600.0)
     ap.add_argument("--hz", type=float, default=5.0)
+    ap.add_argument("--mode", choices=tuple(MODES), default="telemetry",
+                    help="telemetry: F/N (between-job vcgencmd read or not); "
+                         "watchdog: W/N (watchdog-like 5 s poller or not)")
     args = ap.parse_args(argv)
+    order, conds = MODES[args.mode]
 
     b = sensors.get_backend(args.backend)
     is_mock = b.name == "mock"
@@ -242,10 +332,12 @@ def main(argv=None):
     stop_reason = interrupted = None
     pool = log = None
     load_s = 0.0
+    poller, poller_unstopped, intervals = None, [], []
+    offset = _uptime() - time.monotonic()        # /proc/uptime -> time.monotonic()
     try:
         pool = wl.FixedWorkPool(4)
         own = {p.pid for p in pool.procs}                # the workers; the parent is reported
-        for bi, cond in enumerate(ORDER):
+        for bi, cond in enumerate(order):
             t_start, waited, stop_reason = dp.cooldown(temp, args.cooldown_below,
                                                        args.cooldown_max_s, args.poll_s)
             if stop_reason:
@@ -254,6 +346,10 @@ def main(argv=None):
                 break
             log = runner.TelemetryLogger(vw.SysfsReader(b), hz=args.hz)
             log.start()
+            if cond == "W":
+                stop_f = os.path.join(args.outdir, f"poller{bi}.stop")
+                poll_log = os.path.join(args.outdir, f"poller{bi}.log")
+                poller = start_poller(stop_f, poll_log, os.getpid())
             block, t_block = [], time.monotonic()
             try:
                 for item in vw.pair_plan(args.pairs_per_block, hot, cool):
@@ -267,20 +363,29 @@ def main(argv=None):
                     if stop_reason:
                         break
                     s0 = snap.take()
+                    t0 = time.monotonic()
                     rec = pool.run_job(item["spec"], record_units=True)
+                    t1 = time.monotonic()
                     s1 = snap.take()
                     rec.update(block=bi, condition=cond, seq=len(block), pair=item["pair"],
+                               t0_mono=t0, t1_mono=t1,
                                pos=item["pos"], temp_before_c=t,
                                during=diff(snap, s0, s1, own, os.getpid()),
                                shard_walls=[round(s["wall_ms"], 3) for s in rec["shards"]])
                     rec.pop("shards", None)
-                    if cond == "F":
+                    if cond == "F" or args.mode == "watchdog":
                         rec["throttled_after"] = vw._flags(b)   # between jobs, as P4b
                     block.append(rec)
             finally:
                 for s in log.stop():
                     tele.append({**s, "block": bi, "condition": cond})
                 log = None
+                if poller is not None:
+                    left = stop_poller(poller, stop_f)
+                    if left:
+                        poller_unstopped.append(left)
+                    poller = None
+                    intervals += poll_intervals(poll_log, offset)
                 load_s += time.monotonic() - t_block
                 jobs += block
                 blocks.append({"block": bi, "condition": cond, "jobs_run": len(block),
@@ -298,32 +403,43 @@ def main(argv=None):
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         if log:
             log.stop()
+        if poller is not None:
+            left = stop_poller(poller, stop_f)
+            if left:
+                poller_unstopped.append(left)
         unstopped = []
         if pool is not None:
             pool.stop()
             unstopped = list(pool.unstopped)
 
     mark_stalls(jobs)
-    summary = summarize(jobs)
+    if args.mode == "watchdog":
+        mark_overlap(jobs, intervals)
+    summary = summarize(jobs, conds)
     meta = {"experiment": "diag_p4_stalls", "label": "DIAGNOSTIC - not confirmatory",
             "backend": b.name, "mock": is_mock, "source": src,
             "hot": {"units": hot.units_per_shard, "gemms_per_unit": hot.gemms_per_unit},
             "cool": {"units": cool.units_per_shard, "sleep_ms": cool.sleep_per_shard_ms},
-            "order": list(ORDER), "conditions": CONDITIONS,
+            "mode": args.mode, "order": list(order), "conditions": conds,
+            "poll_iterations": len(intervals), "poller_unstopped": poller_unstopped,
             "pairs_per_block": args.pairs_per_block, "max_temp_c": args.max_temp,
             "cooldown_below_c": args.cooldown_below, "max_load_s": args.max_load_s,
             "load_s": round(load_s, 3), "stop_reason": stop_reason, "interrupted": interrupted,
-            "complete": stop_reason is None and interrupted is None and len(blocks) == len(ORDER),
+            "complete": stop_reason is None and interrupted is None and len(blocks) == len(order),
             "unstopped_workers": unstopped, "blocks": blocks, "summary": summary,
             "temp_max_c": max((j["temp_before_c"] for j in jobs), default=None)}
     runner.save_run(args.outdir, "stalls", meta, jobs, tele)
 
     print("\nSTALL DIAGNOSTIC SUMMARY (descriptive)")
     for c, s in summary.items():
-        print(f"  {c} {CONDITIONS[c]}: HOT jobs {s['hot_jobs']}, stalls {s['stalls']}, "
+        print(f"  {c} {conds[c]}: HOT jobs {s['hot_jobs']}, stalls {s['stalls']}, "
               f"HOT latency CV {s['hot_latency_cv'] if s['hot_latency_cv'] is None else round(s['hot_latency_cv'], 4)}, "
               f"foreign CPU per job: stall {s['foreign_ms_stall_mean']} ms vs other "
               f"{s['foreign_ms_other_mean']} ms")
+        if "hot_jobs_poll_overlap" in s:
+            print(f"     poller overlapped {s['hot_jobs_poll_overlap']} HOT jobs "
+                  f"({s['stalls_poll_overlap']} stalls); not overlapped "
+                  f"{s['hot_jobs_no_overlap']} ({s['stalls_no_overlap']} stalls)")
         if s["excess_by_thread_in_stalls"]:
             print(f"     threads with extra CPU in stall jobs: {s['excess_by_thread_in_stalls'][:6]}")
     if stop_reason or interrupted:
