@@ -28,7 +28,7 @@
 {
 # BEGIN SITE CONFIG
 RUN=exp2-a4-20261018-01
-B0=UNSET-set-after-the-pre-launch-check
+B0=d40999f9-6d6f-43e9-96ed-0cee837bb714
 HOST_EXPECTED=pi
 PROJECT="$HOME/tdas-pilot"
 OUT=results
