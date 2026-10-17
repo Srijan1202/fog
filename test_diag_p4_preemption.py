@@ -55,6 +55,30 @@ class Summarize(unittest.TestCase):
         self.assertTrue(dg.summarize([_job([3.0] * 4)], 0)["units_complete"])
 
 
+class Cooldown(unittest.TestCase):
+    def fake(self, temps):
+        it, now = iter(temps), [0.0]
+
+        def sleep(s):
+            now[0] += s
+        return (lambda: next(it)), sleep, (lambda: now[0])
+
+    def test_waits_until_below(self):
+        temp, sleep, clock = self.fake([70.0, 62.0, 56.0, 54.9])
+        t, waited, why = dg.cooldown(temp, 55.0, 300.0, 2.0, sleep, clock)
+        self.assertEqual((t, waited, why), (54.9, 6.0, None))
+
+    def test_gives_up_after_max(self):
+        temp, sleep, clock = self.fake([60.0] * 10)
+        t, waited, why = dg.cooldown(temp, 55.0, 4.0, 2.0, sleep, clock)
+        self.assertEqual((t, waited), (60.0, 4.0))
+        self.assertIn("cooldown: still 60.0 C after 4 s", why)
+
+    def test_unreadable_temperature_stops(self):
+        temp, sleep, clock = self.fake([None])
+        self.assertIn("unreadable", dg.cooldown(temp, 55.0, 300.0, 2.0, sleep, clock)[2])
+
+
 class LoadSpec(unittest.TestCase):
     def test_frozen_p4_hot_spec(self):
         d = tempfile.mkdtemp()
@@ -202,6 +226,27 @@ class EndToEndMock(unittest.TestCase):
         self.assertIn("max_temp", m["stop_reason"])
         self.assertEqual(len(m["blocks"]), 1)
         self.assertEqual(m["blocks"][0]["jobs_run"], 0)
+
+    def test_cooldown_timeout_stops_before_load(self):
+        out = os.path.join(self.d, "cool")
+        rc, text = _run(["--backend", "mock", "--report", self.rep, "--outdir", out,
+                         "--jobs-per-block", "4", "--warmup", "1", "--cooldown-below", "40",
+                         "--cooldown-max-s", "0.2", "--poll-s", "0.05"])
+        self.assertEqual(rc, 0)
+        m = self.meta(out)
+        self.assertFalse(m["complete"])
+        self.assertIn("cooldown: still 45.0 C", m["stop_reason"])
+        self.assertEqual([b["jobs_run"] for b in m["blocks"]], [0])
+        self.assertEqual(m["load_s"], 0.0)
+
+    def test_blocks_record_cooldown_and_start_temperature(self):
+        out = os.path.join(self.d, "rec")
+        rc, _ = _run(["--backend", "mock", "--report", self.rep, "--outdir", out,
+                      "--jobs-per-block", "3", "--warmup", "1"])
+        self.assertEqual(rc, 0)
+        for b in self.meta(out)["blocks"]:
+            self.assertEqual((b["start_temp_c"], b["end_temp_c"]), (45.0, 45.0))
+            self.assertGreaterEqual(b["cooldown_s"], 0.0)
 
     def test_interrupt_saves_data_and_stops_pool(self):
         out = os.path.join(self.d, "int")

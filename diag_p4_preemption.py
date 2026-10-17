@@ -24,9 +24,12 @@ No acceptance decision uses this; it only informs the next configuration
 
 Safety (real hardware): refuses before any load unless the governor is
 performance on all cores, the throttle flags are 0x0, the temperature is
-below --max-start-temp and load1 is below 0.5. Before every job it reads the
-sysfs temperature and stops at --max-temp (default 70 C); total load is
-capped by --max-load-s. The worker pool stops with at most one SIGTERM per
+below --max-start-temp and load1 is below 0.5. Before every block it waits,
+with no load, until the temperature is below --cooldown-below (default 55 C;
+at most --cooldown-max-s), because four busy cores heat the die by about
+15 C in 10 s (run diag-p4-20261017-02 stopped at 70 C in its second block).
+Before every job it reads the sysfs temperature and stops at --max-temp
+(default 70 C); total time under load is capped by --max-load-s. The worker pool stops with at most one SIGTERM per
 worker, never SIGKILL. SIGTERM / Ctrl+C stop the run and the data so far is
 saved, marked interrupted. It changes no setting. The mock backend skips the
 hardware checks and is for tests only.
@@ -135,6 +138,22 @@ def hw_precheck(b, max_start_temp):
     return None
 
 
+def cooldown(temp, below, max_s, poll_s=2.0, sleep=time.sleep, clock=time.monotonic):
+    """Wait, with no load, until temp() < below. Returns (temp, waited_s, reason);
+    reason is None on success, else why the wait ended."""
+    t0 = clock()
+    while True:
+        t = temp()
+        if t is None:
+            return None, clock() - t0, "temperature unreadable during cooldown"
+        if t < below:
+            return t, clock() - t0, None
+        if clock() - t0 >= max_s:
+            return t, clock() - t0, (f"cooldown: still {t:.1f} C after {max_s:.0f} s "
+                                     f"(need < {below} C)")
+        sleep(poll_s)
+
+
 def _sigterm(signum, frame):
     raise KeyboardInterrupt("SIGTERM")
 
@@ -145,11 +164,16 @@ def main(argv=None):
     ap.add_argument("--report", required=True,
                     help="workload validation report.json with frozen P=4 parameters")
     ap.add_argument("--outdir", required=True, help="fresh directory (never overwritten)")
-    ap.add_argument("--jobs-per-block", type=int, default=40)
+    ap.add_argument("--jobs-per-block", type=int, default=25)
     ap.add_argument("--warmup", type=int, default=5, help="jobs excluded per block")
     ap.add_argument("--max-temp", type=float, default=70.0)
     ap.add_argument("--max-start-temp", type=float, default=55.0)
-    ap.add_argument("--max-load-s", type=float, default=180.0)
+    ap.add_argument("--cooldown-below", type=float, default=55.0,
+                    help="before every block, wait with no load until below this (C)")
+    ap.add_argument("--cooldown-max-s", type=float, default=300.0)
+    ap.add_argument("--poll-s", type=float, default=2.0)
+    ap.add_argument("--max-load-s", type=float, default=180.0,
+                    help="cap on total time under load (cooldowns excluded)")
     ap.add_argument("--hz", type=float, default=5.0)
     args = ap.parse_args(argv)
     if args.warmup >= args.jobs_per_block:
@@ -176,11 +200,16 @@ def main(argv=None):
     jobs, tele, blocks = [], [], []
     stop_reason = interrupted = None
     pool = log = None
-    t_load = None
+    load_s = 0.0                                     # time under load, cooldowns excluded
     try:
         pool = wl.FixedWorkPool(4)
-        t_load = time.monotonic()
         for bi, cond in enumerate(ORDER):
+            t_start, waited, stop_reason = cooldown(temp, args.cooldown_below,
+                                                    args.cooldown_max_s, args.poll_s)
+            if stop_reason:
+                blocks.append({"block": bi, "condition": cond, "jobs_run": 0,
+                               "start_temp_c": t_start, "cooldown_s": round(waited, 1)})
+                break
             src_t = {"T0": None, "T1": SysfsTemp(), "T2": b}[cond]
             if is_mock and cond == "T1":
                 src_t = b
@@ -188,6 +217,7 @@ def main(argv=None):
             if log:
                 log.start()
             block = []
+            t_block = time.monotonic()
             try:
                 for i in range(args.jobs_per_block):
                     t = temp()                       # between jobs, outside the latency
@@ -195,7 +225,7 @@ def main(argv=None):
                         stop_reason = "temperature unreadable"
                     elif t >= args.max_temp:
                         stop_reason = f"max_temp: {t:.1f} C >= {args.max_temp} C"
-                    elif time.monotonic() - t_load > args.max_load_s:
+                    elif load_s + time.monotonic() - t_block > args.max_load_s:
                         stop_reason = f"max_load_s {args.max_load_s:.0f} s reached"
                     if stop_reason:
                         break
@@ -207,9 +237,11 @@ def main(argv=None):
                     for s in log.stop():
                         tele.append({**s, "block": bi, "condition": cond})
                     log = None
+                load_s += time.monotonic() - t_block
                 jobs += block
                 blocks.append({"block": bi, "condition": cond, "jobs_run": len(block),
-                               **summarize(block, args.warmup)})
+                               "start_temp_c": t_start, "cooldown_s": round(waited, 1),
+                               "end_temp_c": temp(), **summarize(block, args.warmup)})
             print(f"  block {bi} {cond}: {len(block)} jobs, unit CV "
                   f"{blocks[-1].get('unit_cv', float('nan')):.4f}, long units "
                   f"{blocks[-1].get('share_long', float('nan')):.4f}, nivcsw median "
@@ -237,7 +269,8 @@ def main(argv=None):
             "order": list(ORDER), "conditions": CONDITIONS,
             "jobs_per_block": args.jobs_per_block, "warmup": args.warmup,
             "max_temp_c": args.max_temp, "max_load_s": args.max_load_s,
-            "load_s": round(time.monotonic() - t_load, 3) if t_load else 0.0,
+            "cooldown_below_c": args.cooldown_below, "cooldown_max_s": args.cooldown_max_s,
+            "load_s": round(load_s, 3),
             "stop_reason": stop_reason, "interrupted": interrupted,
             "complete": stop_reason is None and interrupted is None and len(blocks) == len(ORDER),
             "unstopped_workers": unstopped, "blocks": blocks, "by_condition": by_cond,
