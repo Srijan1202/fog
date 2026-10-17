@@ -103,7 +103,7 @@ V4_LABEL = ("DESCRIPTIVE ONLY. Not used in any acceptance decision. The "
 # only, and the throttle flags are read between jobs.
 # ---------------------------------------------------------------------------
 P4B = {"label": "P4b", "P": 4, "n_b": 128, "gemms_per_unit": 4,
-       "v0b_jobs": 10, "v0b_units": 50, "v0c_jobs": 50, "telemetry": "sysfs"}
+       "v0b_jobs": 10, "v0b_units": 12, "v0c_jobs": 50, "telemetry": "sysfs"}   # v0b_units: Amendment 1 (was 50)
 P4B_ADDENDUM = "PREREG_workload_validation_ADDENDUM_P4b.md"
 
 

@@ -448,14 +448,15 @@ class P4bConfiguration(unittest.TestCase):
 
     def test_p4b_constants_are_the_addendum_values(self):
         self.assertEqual(vw.P4B, {"label": "P4b", "P": 4, "n_b": 128, "gemms_per_unit": 4,
-                                  "v0b_jobs": 10, "v0b_units": 50, "v0c_jobs": 50,
+                                  "v0b_jobs": 10, "v0b_units": 12, "v0c_jobs": 50,
                                   "telemetry": "sysfs"})
 
     def test_addendum_states_the_same_values(self):
         with open(os.path.join(os.path.dirname(vw.__file__), vw.P4B_ADDENDUM)) as f:
             doc = f.read()
         for s in ("4 consecutive 128×128 float32 matrix multiplies",
-                  "`gemms_per_unit = 4`", "10 P=4 UNIT jobs of 50 units",
+                  "`gemms_per_unit = 4`", "**10 P=4 UNIT jobs of 12 units each**",
+                  "Amendment 1",
                   "50 P=4 ZERO jobs", "15, 15, 15, 15 pairs", "P = 4 column",
                   "Criteria A1–A9", "A REJECTED P4b is final"):
             self.assertIn(s, doc)
@@ -482,7 +483,7 @@ class P4bConfiguration(unittest.TestCase):
                           "P4b-A3-e1", "P4b-A4-e1"])
         v0b = next(cl for cl in fx.calls if cl["block_id"] == "V0b-e1")
         self.assertEqual(len(v0b["plan"]), 10)
-        self.assertEqual(v0b["plan"][0]["spec"].units_per_shard, 50)
+        self.assertEqual(v0b["plan"][0]["spec"].units_per_shard, 12)       # Amendment 1
         v0c = next(cl for cl in fx.calls if cl["block_id"] == "V0c-e1")
         self.assertEqual(len(v0c["plan"]), 50)
 

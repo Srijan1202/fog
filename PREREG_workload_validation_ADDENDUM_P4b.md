@@ -94,3 +94,27 @@ and statistics limitation are the same.
 - `exp3_ordering.resolve_workload`: accepts configuration `"4b"`.
 - Tests for each change; the launcher gets new hash pins; a separate approval is needed before any
   run.
+
+## Amendment 1 (2026-10-17, after run `wv-p4b-20261017-01`, before any P4b decision data)
+
+**What happened.** Run `wv-p4b-20261017-01` (launcher `e8b67f9`, code `7aafece`) ended **INCOMPLETE**.
+P4b was never tested; this is not a REJECTED result.
+- V0b′ was invalid three times on the pre-registered 65 °C block guard: peaks of 66.2, 65.2 and 66.2 °C,
+  each block starting at 50.1 °C. That used the rerun limit, so V0 was INCOMPLETE and P4b was not run.
+- No calibration or acceptance block ran.
+- The supervision worked: no signal was sent and cleanup was verified. The evidence is in
+  `exp1-rerun-prep/a3/diag/p4b_impl/` (run tar sha256 `350e8e2a…`).
+
+**Cause: a sizing error in section 2 of this addendum.** V0b′ kept the original V0b counts, 10 jobs of 50
+units. A P4b unit is 4 GEMMs, so each V0b′ job was about 750 ms of full four-core load instead of the
+original 190 ms. Ten such jobs back to back heat the die by about 16 °C.
+
+**Change (the only one).** V0b′ becomes **10 P=4 UNIT jobs of 12 units each**, that is 48 GEMMs per shard
+per job, about the original V0b's 50. The V0b load profile then matches the original validation.
+
+Unchanged:
+- V0c′, the derivation of u_h, u_c and S0, calibration, acceptance and the rerun limits;
+- criteria A1–A9 (P = 4 column), the 65 °C guard and the external 67 °C watchdog;
+- the telemetry scheme.
+
+The next run is a new run id. `wv-p4b-20261017-01` stays on record as INCOMPLETE.
