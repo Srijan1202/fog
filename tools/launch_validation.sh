@@ -18,12 +18,13 @@
 # monitoring not established; 5 token written but not acknowledged.
 {
 # BEGIN SITE CONFIG
-RUN=wv-20261015-01
-B0=440df598-3e7c-4f15-9ad4-e383804e6bc6
+RUN=wv-p4b-20261017-01
+B0=049f6578-3b7a-4b72-b36d-cf171d5f447c
 HOST_EXPECTED=pi
 PROJECT="$HOME/tdas-pilot"
 OUT=results/workload_validation
 CAP=21600
+VALIDATOR_ARGS="--config 4b"
 GRACE=30
 BARRIER_S=120
 EXIT_WAIT_S=30
@@ -39,12 +40,13 @@ LAUNCH_PATH=/usr/sbin:/usr/bin:/sbin:/bin
 LAUNCH_LANG=en_GB.UTF-8
 ARCHIVES="results/exp1_1core results/exp1_4core"
 EXPECTED_HASHES='
-0b5ce770e3281f3f2ea98808d6a3084ae1a68f9d450155cad5c3c8c28a9f36ca validate_workload.py
-31b6d8f6955798a4395baeaa8733e8a13b16e600f12cfcd071e00354641ad152 workload.py
+c024243bcf7fe258e6e46daa6792ae3c4f0819761e168b3ed881c2d6136fb08b validate_workload.py
+aabc88f6f23de2be782ca727e473ce3a02b2bf3f1f602ad02a5fd75b217a3033 workload.py
 acc4d28a6f422fb22c307da3574e26efb3129610e73616bb49f7b719f9f454e3 monitor_guard.py
 31665b5a42dce04b1d97dc66be2df7fc44cba97a7c72f285cad53beb2f59a285 runner.py
-3cdc62dfc784b18733e248c883a0eab763d903389f0e652f4e3478adf408a019 sensors.py
+d9df2f74772c9bd0ac0cc8204f59fb97088df3744dbc16048e6eb4e7ae52c9bc sensors.py
 05ab24e5ea4c8bad9e356990328a9b1b4529c1f40d95b08f73471b0d28ece864 PREREG_workload_validation.md
+2f2ff9972c812476725d74eca8baf2537f6a5861a92c11b988079e4218b40484 PREREG_workload_validation_ADDENDUM_P4b.md
 15adfeeb21b6fa44a857e5172066a1adeba92ad69be8376e8d1c7a283ebe4eba tools/validation_monitor.sh
 33fc0af9684cf8723686ca7d4e0a35812e22f23b2557afc1a189ec233adeb90f results/exp1_1core/SHA256SUMS
 42d58faf87a17ee703ffbdc502807f366f39d3b2de00cb36f4bad6308a3106f7 results/exp1_1core/LABEL.txt
@@ -58,6 +60,8 @@ die() { echo "ABORT: $*"; echo "== NOTHING LAUNCHED"; exit 3; }
 st() { local n=$1 s; s=$(cat "/proc/$2/stat" 2>/dev/null) || return 1; s=${s##*) }; set -- $s; eval "echo \${$n}"; }   # field after "pid (comm)": 1=state 4=session 20=start
 case "$-" in *i*|*m*) die "launching shell is interactive or has job control";; esac
 cd "$PROJECT" || die "cannot cd to $PROJECT"
+VARGS=${VALIDATOR_ARGS:-}       # site config; empty = the original validation, "--config 4b" = P4b
+case "$VARGS" in ""|"--config 4b") ;; *) die "VALIDATOR_ARGS must be empty or '--config 4b' (got: $VARGS)";; esac
 
 state_problem() {   # prints a reason if the host is not in the required state; nothing if OK
   [ "$(hostname)" = "$HOST_EXPECTED" ] || { echo "hostname $(hostname)"; return; }
@@ -171,14 +175,14 @@ echo "outputs absent; writable; ${free} kB free; load15 $l15"
 set -o noclobber
 [ -d "$OUT" ] || mkdir "$OUT" || die "cannot create $OUT"          # parent only, never the run directory
 env -i HOME="$HOME" PATH="$LAUNCH_PATH" LANG="$LAUNCH_LANG" \
-  setsid nohup python3 -u validate_workload.py --outdir "$OUT" --run-id "$RUN" --require-monitor "$BARRIER_S" \
+  setsid nohup python3 -u validate_workload.py --outdir "$OUT" --run-id "$RUN" --require-monitor "$BARRIER_S" $VARGS \
   > "$OUT/$RUN.stdout.log" 2>&1 < /dev/null &
 VPID=$!
 LAUNCH_EPOCH=$(date +%s)
 echo "== PHASE 3 validator started: pid $VPID at $(date '+%F %T %Z'); it waits up to ${BARRIER_S}s for MONITOR_OK"
 
 # ---------------- helpers (identity; no PID is ever trusted alone) ----------------
-VCMD="python3 -u validate_workload.py --outdir $OUT --run-id $RUN --require-monitor $BARRIER_S "
+VCMD="python3 -u validate_workload.py --outdir $OUT --run-id $RUN --require-monitor $BARRIER_S ${VARGS:+$VARGS }"
 VST=""
 vok() {   # the exact validator we started: start time, not zombie, executable, full argv
   [ -n "$VST" ] && [ "$(st 20 "$VPID")" = "$VST" ] && [ "$(st 1 "$VPID")" != Z ] &&
