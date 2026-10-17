@@ -46,9 +46,12 @@ import os
 import signal
 import time
 
+import threading
+
 import numpy as np
 
 import diag_p4_preemption as dp
+import fwclock
 import runner
 import sensors
 import validate_workload as vw
@@ -68,7 +71,48 @@ MODES = {"telemetry": (ORDER, CONDITIONS),
          # P4c check: W runs the fork-free watchdog's loop body (builtins only)
          "watchdog-nf": (("W", "N", "N", "W") * 4,
                          {"W": "fork-free poller every 5 s (P4c validation_monitor.sh loop body)",
-                          "N": "no poller"})}
+                          "N": "no poller"}),
+         # A4 stall control: W reads the firmware ARM clock through the mailbox at
+         # 5 Hz from a parent thread (fwclock.py), as Experiment 2's telemetry would
+         "mailbox": (("W", "N", "N", "W") * 4,
+                     {"W": "5 Hz firmware-mailbox ARM-clock reads in a parent thread (A4)",
+                      "N": "no clock reads"})}
+
+
+class FakeClock:
+    """Stands in for fwclock.ArmClockMailbox on the mock backend (tests only)."""
+
+    def read(self):
+        time.sleep(0.001)
+        return 1800.0
+
+    def close(self):
+        pass
+
+
+class ClockReader:
+    """5 Hz reads of a clock in a thread; records (t_start, t_end, MHz or None)."""
+
+    def __init__(self, clock, hz=5.0):
+        self.clock, self.period = clock, 1.0 / hz
+        self.samples, self._stop = [], threading.Event()
+        self._t = threading.Thread(target=self._loop, daemon=True)
+
+    def _loop(self):
+        while not self._stop.is_set():
+            t0 = time.monotonic()
+            v = self.clock.read()
+            self.samples.append((t0, time.monotonic(), v))
+            self._stop.wait(max(0.0, self.period - (time.monotonic() - t0)))
+
+    def start(self):
+        self._t.start()
+        return self
+
+    def stop(self):
+        self._stop.set()
+        self._t.join(timeout=5.0)
+        return self.samples
 POLLER = r'''
 STOP=$1; LOG=$2; VP=$3
 while [ ! -e "$STOP" ]; do
@@ -165,10 +209,12 @@ MIN_TASK_MS = 0.2              # per-job foreign thread CPU below this is not li
 
 
 def load_p4b_specs(report_path):
-    """HOT and COOL JobSpecs of the frozen P4b parameters in a validation report."""
+    """HOT and COOL JobSpecs of the frozen four-GEMM P=4 parameters in a validation
+    report: configuration P4c ("4c") if present, else P4b ("4b")."""
     with open(report_path) as f:
         rep = json.load(f)
-    cfg = (rep.get("configs") or {}).get("4b") or {}
+    cfgs = rep.get("configs") or {}
+    cfg = cfgs.get("4c") or cfgs.get("4b") or {}
     fr = cfg.get("frozen") or {}
     if (not all(k in fr for k in ("P", "n_b", "u_h", "u_c", "S_ms"))
             or fr["P"] != 4 or fr.get("gemms_per_unit") != 4):
@@ -353,6 +399,14 @@ def main(argv=None):
     except FileExistsError:
         print(f"refused: {args.outdir} exists; refusing to overwrite")
         return 2
+    clock = None
+    if args.mode == "mailbox":
+        try:
+            clock = FakeClock() if is_mock else fwclock.ArmClockMailbox()
+        except OSError as e:
+            print(f"refused before any load: firmware mailbox unavailable ({e})")
+            os.rmdir(args.outdir)
+            return 2
     temp = (lambda: 45.0) if is_mock else dp.read_sysfs_temp
     old_handlers = (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGINT))
     signal.signal(signal.SIGTERM, _sigterm)
@@ -363,6 +417,7 @@ def main(argv=None):
     pool = log = None
     load_s = 0.0
     poller, poller_unstopped, intervals = None, [], []
+    reader, clock_samples = None, []
     offset = _uptime() - time.monotonic()        # /proc/uptime -> time.monotonic()
     try:
         pool = wl.FixedWorkPool(4)
@@ -376,7 +431,9 @@ def main(argv=None):
                 break
             log = runner.TelemetryLogger(vw.SysfsReader(b), hz=args.hz)
             log.start()
-            if cond == "W":
+            if cond == "W" and args.mode == "mailbox":
+                reader = ClockReader(clock, args.hz).start()
+            elif cond == "W":
                 stop_f = os.path.join(args.outdir, f"poller{bi}.stop")
                 poll_log = os.path.join(args.outdir, f"poller{bi}.log")
                 poller = start_poller(stop_f, poll_log, os.getpid(),
@@ -404,7 +461,7 @@ def main(argv=None):
                                during=diff(snap, s0, s1, own, os.getpid()),
                                shard_walls=[round(s["wall_ms"], 3) for s in rec["shards"]])
                     rec.pop("shards", None)
-                    if cond == "F" or args.mode.startswith("watchdog"):
+                    if cond == "F" or args.mode.startswith("watchdog") or args.mode == "mailbox":
                         rec["throttled_after"] = vw._flags(b)   # between jobs, as P4b
                     block.append(rec)
             finally:
@@ -417,6 +474,11 @@ def main(argv=None):
                         poller_unstopped.append(left)
                     poller = None
                     intervals += [(bi, s, e) for s, e in poll_intervals(poll_log, offset)]
+                if reader is not None:
+                    got = reader.stop()
+                    reader = None
+                    clock_samples += [(bi, a, z, v) for a, z, v in got]
+                    intervals += [(bi, a, z) for a, z, v in got]
                 load_s += time.monotonic() - t_block
                 jobs += block
                 blocks.append({"block": bi, "condition": cond, "jobs_run": len(block),
@@ -444,7 +506,11 @@ def main(argv=None):
             unstopped = list(pool.unstopped)
 
     mark_stalls(jobs)
-    if args.mode.startswith("watchdog"):
+    if reader is not None:
+        clock_samples += [(-1, a, z, v) for a, z, v in reader.stop()]
+    if clock is not None:
+        clock.close()
+    if args.mode.startswith("watchdog") or args.mode == "mailbox":
         mark_overlap(jobs, intervals)
     summary = summarize(jobs, conds)
     meta = {"experiment": "diag_p4_stalls", "label": "DIAGNOSTIC - not confirmatory",
@@ -453,6 +519,12 @@ def main(argv=None):
             "cool": {"units": cool.units_per_shard, "sleep_ms": cool.sleep_per_shard_ms},
             "mode": args.mode, "order": list(order), "conditions": conds,
             "poll_iterations": len(intervals), "poller_unstopped": poller_unstopped,
+            "clock_reads": len(clock_samples),
+            "clock_misses": sum(1 for x in clock_samples if x[3] is None),
+            "clock_mhz_min": min((x[3] for x in clock_samples if x[3] is not None), default=None),
+            "clock_read_wall_ms_median": (round(float(np.median([(z - a) * 1e3 for _, a, z, _ in
+                                                                  clock_samples])), 3)
+                                          if clock_samples else None),
             "pairs_per_block": args.pairs_per_block, "max_temp_c": args.max_temp,
             "cooldown_below_c": args.cooldown_below, "max_load_s": args.max_load_s,
             "load_s": round(load_s, 3), "stop_reason": stop_reason, "interrupted": interrupted,

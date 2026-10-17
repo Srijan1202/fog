@@ -124,6 +124,16 @@ class LoadSpecs(unittest.TestCase):
         self.assertEqual((cool.units_per_shard, cool.sleep_per_shard_ms), (1, 2.0))
         self.assertEqual(src["params_id"], "P4b-F1")
 
+    def test_p4c_report_is_used_when_present(self):
+        p = os.path.join(tempfile.mkdtemp(), "r.json")
+        fr = {"P": 4, "n_b": 128, "u_h": 13, "u_c": 5, "S_ms": 119.55, "gemms_per_unit": 4,
+              "params_id": "P4c-F1"}
+        with open(p, "w") as f:
+            json.dump({"run_id": "wv-p4c", "configs": {"4c": {"status": "ACCEPTED", "frozen": fr}}}, f)
+        hot, cool, src = ds.load_p4b_specs(p)
+        self.assertEqual((hot.units_per_shard, cool.units_per_shard, src["params_id"],
+                          src["status"]), (13, 5, "P4c-F1", "ACCEPTED"))
+
     def test_not_p4b_refused(self):
         p = os.path.join(tempfile.mkdtemp(), "r.json")
         with open(p, "w") as f:
@@ -237,6 +247,50 @@ class ForkFreePollerP4c(unittest.TestCase):
         self.assertEqual(m["poller_unstopped"], [])
         with open(os.path.join(out, "poller0.log.readings")) as f:
             self.assertRegex(f.readline(), r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d +\d+\.\d   uv=")
+
+
+class MailboxModeA4(unittest.TestCase):
+    def test_mailbox_mode_reads_the_clock_only_in_w_blocks(self):
+        d = tempfile.mkdtemp(prefix="stalls_mb_")
+        out = os.path.join(d, "run")
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = ds.main(["--backend", "mock", "--report", _report(d), "--outdir", out,
+                          "--mode", "mailbox", "--pairs-per-block", "3", "--poll-s", "0.01"])
+        self.assertEqual(rc, 0)
+        with open(os.path.join(out, "stalls.meta.json")) as f:
+            m = json.load(f)
+        self.assertTrue(m["complete"])
+        self.assertEqual(m["mode"], "mailbox")
+        self.assertGreaterEqual(m["clock_reads"], 8)                 # >= 1 per W block
+        self.assertEqual((m["clock_misses"], m["clock_mhz_min"]), (0, 1800.0))
+        with open(os.path.join(out, "stalls.jobs.jsonl")) as f:
+            jobs = [json.loads(x) for x in f]
+        # mock jobs last a few ms and reads come every 200 ms, so whether one
+        # overlaps is chance; overlap marking ran, and never across blocks:
+        self.assertTrue(all("poll_overlap" in j for j in jobs))
+        self.assertFalse(any(j["poll_overlap"] for j in jobs if j["condition"] == "N"))
+        self.assertTrue(all("throttled_after" in j for j in jobs))   # P4c scheme kept
+
+    def test_unavailable_mailbox_refuses_before_load(self):
+        from unittest import mock
+        d = tempfile.mkdtemp(prefix="stalls_mb_")
+        out = os.path.join(d, "run")
+
+        class FakePi:
+            name = "raspberrypi"
+
+        boom = mock.Mock(side_effect=AssertionError("no load may start"))
+        with mock.patch.object(ds.sensors, "get_backend", return_value=FakePi()), \
+                mock.patch.object(ds.dp, "hw_precheck", return_value=None), \
+                mock.patch.object(ds.fwclock, "ArmClockMailbox",
+                                  side_effect=PermissionError(13, "Permission denied")), \
+                mock.patch.object(ds.wl, "FixedWorkPool", boom), \
+                contextlib.redirect_stdout(io.StringIO()) as buf:
+            rc = ds.main(["--report", _report(d), "--outdir", out, "--mode", "mailbox"])
+        self.assertEqual(rc, 2)
+        self.assertIn("firmware mailbox unavailable", buf.getvalue())
+        self.assertFalse(os.path.exists(out))
+        boom.assert_not_called()
 
 
 class RestoresSignalHandlers(unittest.TestCase):
