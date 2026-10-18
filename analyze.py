@@ -52,7 +52,22 @@ def boot_diff(a, b, iters=10000, seed=0):
         "excludes_zero": bool(lo > 0 or hi < 0),
         "rel_pct": float((np.median(a) - np.median(b)) / np.median(b) * 100)
         if np.median(b) else None,
+        # A7: two-sided bootstrap p-value from the same resamples (for Holm)
+        "p_value": float(min(1.0, 2.0 * min(np.mean(d <= 0), np.mean(d >= 0)))),
     }
+
+
+def holm(pvals, alpha=0.05):
+    """Holm step-down. Returns a list of booleans (rejected), in input order."""
+    order = sorted(range(len(pvals)), key=lambda i: pvals[i])
+    rejected = [False] * len(pvals)
+    m = len(pvals)
+    for rank, i in enumerate(order):
+        if pvals[i] <= alpha / (m - rank):
+            rejected[i] = True
+        else:
+            break
+    return rejected
 
 
 def cliffs_delta(a, b):
@@ -318,6 +333,38 @@ def classify_g2(e2, rule=G2_RULE):
     return "FAIL", sl, "CI includes 0: s(T) flat over the probed range"
 
 
+E3_RULE = {"min_valid_per_ordering": 8, "config": "4c", "alpha": 0.05}
+
+
+def e3_invalid(e3, rule=E3_RULE):
+    """Why Experiment 3 cannot decide G3-G6 under A7 (None = valid). Mock records
+    skip the hardware-only checks, as for G2."""
+    if e3.get("amendment") != "A7":
+        return "exp3 record made before Amendment A7; it cannot decide G3-G6"
+    if e3.get("abort_reason") or e3.get("interrupted"):
+        return f"exp3 aborted ({e3.get('abort_reason') or e3.get('interrupted')})"
+    if not e3.get("session_complete"):
+        return "exp3 session did not complete its schedule"
+    if not e3.get("mock"):
+        wk = e3.get("workload") or {}
+        if not wk.get("accepted") or wk.get("config") != rule["config"]:
+            return "exp3 jobs are not from an ACCEPTED P4c workload validation"
+        if not e3.get("monitor"):
+            return "exp3 ran without verified supervision"
+    if not _num(e3.get("g1_knee_c")):
+        return "exp3 recorded no G1 knee"
+    valid = {}
+    for r in e3.get("runs") or []:
+        if r.get("valid") is True:
+            valid[r["mode"]] = valid.get(r["mode"], 0) + 1
+    short = {m: valid.get(m, 0) for m in e3.get("orderings") or []
+             if valid.get(m, 0) < rule["min_valid_per_ordering"]}
+    if not e3.get("orderings") or short:
+        return (f"too few valid sequences per ordering {short} "
+                f"(need >= {rule['min_valid_per_ordering']} each)")
+    return None
+
+
 def overall_verdict(gates):
     """Map gate results to a verdict. Returns (verdict, failed_structural)."""
     hard_fail = [k for k in STRUCTURAL if gates.get(k) is False]
@@ -335,6 +382,99 @@ def overall_verdict(gates):
                                   "G5_outcome")):
         return "PROCEED", []
     return "INCONCLUSIVE", []
+
+
+def gates_4_to_6(runs, gates, notes, no_knee):
+    """G4-G6 on the valid Experiment 3 sequences (A7). Fills gates/notes in place."""
+    # ---------------- GATE 4: mediator moves ----------------
+    print("\n--- GATE 4: does ORDERING change TIME ABOVE KNEE? (mediator) ---")
+    tak = by_mode(runs, "time_above_knee_s")
+    if len(tak) < 2:
+        print("  cannot test (knee unknown or single ordering)")
+        gates["G4_mediator"] = None
+        notes["G4_mediator"] = "NOT TESTED: knee unknown or single ordering"
+    else:
+        for m, v in sorted(tak.items()):
+            print(f"  {m:12s} median {np.median(v):8.1f}s  (n={len(v)})")
+        best = max(tak, key=lambda m: np.median(tak[m]))
+        worst = min(tak, key=lambda m: np.median(tak[m]))
+        d = boot_diff(tak[best], tak[worst])
+        print(f"  max-min: {best} vs {worst}: "
+              f"{d['diff']:+.1f}s [{d['ci_lo']:+.1f}, {d['ci_hi']:+.1f}] "
+              f"excludes_zero={d['excludes_zero']}")
+        gates["G4_mediator"] = bool(d["excludes_zero"])
+        if not d["excludes_zero"]:
+            print("  FAIL: orderings produce indistinguishable thermal")
+            print("        trajectories. No causal pathway." +
+                  (" (knee not established; see verdict)" if no_knee
+                   else " TDAS DEAD."))
+
+    # ---------------- GATE 5: outcome moves ----------------
+    print("\n--- GATE 5: does ORDERING change TAIL LATENCY? (outcome) ---")
+    res = {}
+    for field, label in (("p99_ms", "P99"), ("p95_ms", "P95"),
+                         ("mean_ms", "mean"),
+                         ("throughput_jobs_s", "throughput")):
+        g = by_mode(runs, field)
+        if len(g) < 2:
+            continue
+        print(f"\n  [{label}]")
+        for m, v in sorted(g.items()):
+            print(f"    {m:12s} median {np.median(v):9.2f}  (n={len(v)})")
+        pairs = []
+        for a, b_ in combinations(sorted(g), 2):
+            d = boot_diff(g[a], g[b_])
+            cd = cliffs_delta(g[a], g[b_])
+            pairs.append((a, b_, d, cd))
+            flag = "*" if d["excludes_zero"] else " "
+            print(f"    {flag} {a:12s} - {b_:12s}: {d['diff']:+8.2f} "
+                  f"[{d['ci_lo']:+.2f}, {d['ci_hi']:+.2f}] "
+                  f"cliffs_d={cd:+.2f}")
+        res[field] = pairs
+
+    # A7: a pair counts only if it survives a Holm correction across the pairs
+    p99 = res.get("p99_ms", [])
+    keep = holm([d["p_value"] for _, _, d, _ in p99], E3_RULE["alpha"])
+    any_sig = any(keep)
+    gates["G5_outcome"] = bool(any_sig)
+    survivors = [f"{a} - {b_} (p={d['p_value']:.4f})" for (a, b_, d, _), k in zip(p99, keep) if k]
+    print(f"\n  P99 pairs surviving Holm (alpha {E3_RULE['alpha']}, {len(p99)} pairs): "
+          + (", ".join(survivors) if survivors else "none"))
+    if not any_sig:
+        print("  No P99 difference between orderings survives the Holm correction.")
+
+    # secondary outcomes: did anything else respond? (Holm within each metric)
+    sec = {}
+    for f in ("mean_ms", "throughput_jobs_s"):
+        pr = res.get(f, [])
+        sec[f] = any(holm([d["p_value"] for _, _, d, _ in pr], E3_RULE["alpha"]))
+    gates["G5b_secondary"] = bool(any(sec.values()))
+    if not any_sig and gates["G5b_secondary"]:
+        moved = [k for k, v in sec.items() if v]
+        print(f"  BUT these DID respond: {', '.join(moved)}")
+        print("  -> the thermal effect is real but does not land on the tail.")
+        print("     Consider reframing the claim around the metric that moved,")
+        print("     rather than abandoning or overclaiming on P99.")
+
+    # ---------------- GATE 6: mediation consistency ----------------
+    print("\n--- GATE 6: is the effect MEDIATED (not just correlated)? ---")
+    if gates.get("G4_mediator") and gates.get("G5_outcome"):
+        xs, ys = [], []
+        for r in runs:
+            if r.get("time_above_knee_s") is not None and r.get("p99_ms"):
+                xs.append(r["time_above_knee_s"])
+                ys.append(r["p99_ms"])
+        if len(xs) > 4 and np.std(xs) > 0:
+            c = float(np.corrcoef(xs, ys)[0, 1])
+            print(f"  corr(time_above_knee, p99) = {c:+.3f} over {len(xs)} runs")
+            gates["G6_mediation"] = bool(c > 0.3)
+            print("  PASS - mediator tracks outcome" if c > 0.3 else
+                  "  FAIL - mediator and outcome do not co-vary; the latency")
+        else:
+            gates["G6_mediation"] = None
+    else:
+        print("  not testable (need both G4 and G5)")
+        gates["G6_mediation"] = None
 
 
 def main():
@@ -402,7 +542,10 @@ def main():
 
     # ---------------- GATE 3: cold-latency match (attack #7) -------
     print("\n--- GATE 3: are HOT and COOL indistinguishable when cold? ---")
-    if e3 and e3.get("cold_latency_match"):
+    if e3 and e3_invalid(e3):
+        print("  not decided (see GATES 3-6 below)")
+        gates["G3_match"] = None
+    elif e3 and e3.get("cold_latency_match"):
         vm = e3["cold_latency_match"]
         if vm.get("note") == "mock":
             print("  (mock - not applicable)")
@@ -425,89 +568,15 @@ def main():
 
     runs = e3["runs"]
 
-    # ---------------- GATE 4: mediator moves ----------------
-    print("\n--- GATE 4: does ORDERING change TIME ABOVE KNEE? (mediator) ---")
-    tak = by_mode(runs, "time_above_knee_s")
-    if len(tak) < 2:
-        print("  cannot test (knee unknown or single ordering)")
-        gates["G4_mediator"] = None
-        notes["G4_mediator"] = "NOT TESTED: knee unknown or single ordering"
+    why3 = e3_invalid(e3)
+    if why3:
+        print(f"\n--- GATES 3-6 (A7): INCONCLUSIVE: {why3} ---")
+        for g in ("G3_match", "G4_mediator", "G5_outcome", "G5b_secondary", "G6_mediation"):
+            gates[g] = None
+        notes["G4_mediator"] = f"INCONCLUSIVE (A7): {why3}"
     else:
-        for m, v in sorted(tak.items()):
-            print(f"  {m:12s} median {np.median(v):8.1f}s  (n={len(v)})")
-        best = max(tak, key=lambda m: np.median(tak[m]))
-        worst = min(tak, key=lambda m: np.median(tak[m]))
-        d = boot_diff(tak[best], tak[worst])
-        print(f"  max-min: {best} vs {worst}: "
-              f"{d['diff']:+.1f}s [{d['ci_lo']:+.1f}, {d['ci_hi']:+.1f}] "
-              f"excludes_zero={d['excludes_zero']}")
-        gates["G4_mediator"] = bool(d["excludes_zero"])
-        if not d["excludes_zero"]:
-            print("  FAIL: orderings produce indistinguishable thermal")
-            print("        trajectories. No causal pathway." +
-                  (" (knee not established; see verdict)" if no_knee
-                   else " TDAS DEAD."))
-
-    # ---------------- GATE 5: outcome moves ----------------
-    print("\n--- GATE 5: does ORDERING change TAIL LATENCY? (outcome) ---")
-    res = {}
-    for field, label in (("p99_ms", "P99"), ("p95_ms", "P95"),
-                         ("mean_ms", "mean"),
-                         ("throughput_jobs_s", "throughput")):
-        g = by_mode(runs, field)
-        if len(g) < 2:
-            continue
-        print(f"\n  [{label}]")
-        for m, v in sorted(g.items()):
-            print(f"    {m:12s} median {np.median(v):9.2f}  (n={len(v)})")
-        pairs = []
-        for a, b_ in combinations(sorted(g), 2):
-            d = boot_diff(g[a], g[b_])
-            cd = cliffs_delta(g[a], g[b_])
-            pairs.append((a, b_, d, cd))
-            flag = "*" if d["excludes_zero"] else " "
-            print(f"    {flag} {a:12s} - {b_:12s}: {d['diff']:+8.2f} "
-                  f"[{d['ci_lo']:+.2f}, {d['ci_hi']:+.2f}] "
-                  f"cliffs_d={cd:+.2f}")
-        res[field] = pairs
-
-    p99 = res.get("p99_ms", [])
-    any_sig = any(d["excludes_zero"] for _, _, d, _ in p99)
-    gates["G5_outcome"] = bool(any_sig)
-    if not any_sig:
-        print("\n  No P99 difference between orderings survives its CI.")
-
-    # secondary outcomes: did anything else respond?
-    sec = {}
-    for f in ("mean_ms", "throughput_jobs_s"):
-        sec[f] = any(d["excludes_zero"] for _, _, d, _ in res.get(f, []))
-    gates["G5b_secondary"] = bool(any(sec.values()))
-    if not any_sig and gates["G5b_secondary"]:
-        moved = [k for k, v in sec.items() if v]
-        print(f"  BUT these DID respond: {', '.join(moved)}")
-        print("  -> the thermal effect is real but does not land on the tail.")
-        print("     Consider reframing the claim around the metric that moved,")
-        print("     rather than abandoning or overclaiming on P99.")
-
-    # ---------------- GATE 6: mediation consistency ----------------
-    print("\n--- GATE 6: is the effect MEDIATED (not just correlated)? ---")
-    if gates.get("G4_mediator") and gates.get("G5_outcome"):
-        xs, ys = [], []
-        for r in runs:
-            if r.get("time_above_knee_s") is not None and r.get("p99_ms"):
-                xs.append(r["time_above_knee_s"])
-                ys.append(r["p99_ms"])
-        if len(xs) > 4 and np.std(xs) > 0:
-            c = float(np.corrcoef(xs, ys)[0, 1])
-            print(f"  corr(time_above_knee, p99) = {c:+.3f} over {len(xs)} runs")
-            gates["G6_mediation"] = bool(c > 0.3)
-            print("  PASS - mediator tracks outcome" if c > 0.3 else
-                  "  FAIL - mediator and outcome do not co-vary; the latency")
-        else:
-            gates["G6_mediation"] = None
-    else:
-        print("  not testable (need both G4 and G5)")
-        gates["G6_mediation"] = None
+        runs = [r for r in e3["runs"] if r.get("valid") is True]   # A7: valid sequences only
+        gates_4_to_6(runs, gates, notes, no_knee)
 
     # ---------------- VERDICT ----------------
     print("\n" + "=" * 70)

@@ -81,18 +81,25 @@ E2_PASS = make_e2(0.8)
 E2_FLAT = make_e2(0.0)
 
 
-def make_e3(moves=True):
-    """Two orderings x 6 runs. moves=True: mediator and P99 separate cleanly."""
+def make_e3(moves=True, n=8, **over):
+    """A valid A7 record: two orderings x n valid sequences. moves=True: mediator and
+    P99 separate cleanly."""
     runs = []
-    for i in range(6):
+    for i in range(n):
         for mode, off in (("alternating", 0), ("hot_first", 1)):
             k = off if moves else 0
-            runs.append({"mode": mode, "time_above_knee_s": 100 + 50 * k + i,
+            runs.append({"mode": mode, "valid": True, "time_above_knee_s": 100 + 50 * k + i,
                          "p99_ms": 300 + 60 * k + i, "p95_ms": 290 + 60 * k + i,
                          "mean_ms": 250 + i, "throughput_jobs_s": 4.0 + 0.01 * i})
-    return {"cold_latency_match": {"hot_median_ms": 236.5, "cool_median_ms": 236.0,
-                                   "relative_gap": 0.002, "matched": True},
-            "runs": runs}
+    e3 = {"amendment": "A7", "mock": False, "session_complete": True,
+          "workload": {"accepted": True, "config": "4c"},
+          "monitor": {"watchdog_pid": 1}, "g1_knee_c": 80.2,
+          "orderings": ["alternating", "hot_first"],
+          "cold_latency_match": {"hot_median_ms": 236.5, "cool_median_ms": 236.0,
+                                 "relative_gap": 0.002, "matched": True},
+          "runs": runs}
+    e3.update(over)
+    return e3
 
 
 def write_outdir(e1=None, e2=None, e3=None):
@@ -394,6 +401,86 @@ class G2AmendmentA4(unittest.TestCase):
         result, out = run(E1_KNEE, make_e2(-0.8), make_e3(True))
         self.assertNotEqual(result["verdict"], "KILL")
         self.assertIn("INCONCLUSIVE: latency falls", out)
+
+
+class Exp3AmendmentA7(unittest.TestCase):
+    """AMENDMENT_A7_exp3.md: validity for G3-G6 and Holm-corrected G5."""
+
+    def test_holm_step_down(self):
+        self.assertEqual(an.holm([0.01, 0.04, 0.03, 0.2]), [True, False, False, False])
+        self.assertEqual(an.holm([0.001, 0.012, 0.03]), [True, True, True])   # 0.05/3, /2, /1
+        self.assertEqual(an.holm([0.02, 0.02]), [True, True])
+        self.assertEqual(an.holm([0.03, 0.03]), [False, False])
+        self.assertEqual(an.holm([]), [])
+
+    def test_bootstrap_p_value(self):
+        d = an.boot_diff([10.0, 11, 12, 13, 14], [1.0, 2, 3, 4, 5])
+        self.assertLess(d["p_value"], 0.01)
+        d = an.boot_diff([1.0, 2, 3, 4, 5], [1.0, 2, 3, 4, 5])
+        self.assertGreater(d["p_value"], 0.5)
+
+    def test_valid_record_passes_the_rule(self):
+        self.assertIsNone(an.e3_invalid(make_e3()))
+
+    def test_every_validity_rule_gives_inconclusive(self):
+        e = make_e3()
+        few = [r for r in e["runs"] if not (r["mode"] == "hot_first" and r["time_above_knee_s"] > 155)]
+        flagged = [dict(r, valid=False) if r["mode"] == "alternating" and r["time_above_knee_s"] < 102
+                   else r for r in e["runs"]]
+        cases = {
+            "pre-A7": make_e3(amendment=None),
+            "aborted": make_e3(abort_reason="watchdog lost"),
+            "interrupted": make_e3(interrupted="interrupted (SIGTERM)"),
+            "incomplete schedule": make_e3(session_complete=False),
+            "not P4c": make_e3(workload={"accepted": True, "config": "4b"}),
+            "not accepted": make_e3(workload={"accepted": False, "config": "4c"}),
+            "unsupervised": make_e3(monitor=None),
+            "no knee": make_e3(g1_knee_c=None),
+            "7 valid hot_first": make_e3(runs=few),
+            "2 invalid alternating": make_e3(runs=flagged),
+            "ordering without runs": make_e3(orderings=["alternating", "hot_first", "random"]),
+        }
+        for name, e3 in cases.items():
+            with self.subTest(case=name):
+                self.assertIsNotNone(an.e3_invalid(e3))
+                result, out = run(E1_KNEE, E2_PASS, e3)
+                for g in ("G3_match", "G4_mediator", "G5_outcome", "G6_mediation"):
+                    self.assertIsNone(result["gates"][g], g)
+                self.assertNotEqual(result["verdict"], "KILL")
+                self.assertIn("GATES 3-6 (A7): INCONCLUSIVE", out)
+
+    def test_mock_skips_hardware_checks(self):
+        self.assertIsNone(an.e3_invalid(make_e3(mock=True, workload={}, monitor=None)))
+
+    def test_invalid_sequences_never_enter_the_analysis(self):
+        e = make_e3(n=10)
+        # two extra INVALID hot_first sequences with a huge P99 would otherwise move nothing here,
+        # but must not be counted or used
+        e["runs"] += [{"mode": "alternating", "valid": False, "time_above_knee_s": 999,
+                       "p99_ms": 9999, "p95_ms": 9999, "mean_ms": 999, "throughput_jobs_s": 1.0}] * 3
+        result, out = run(E1_KNEE, E2_PASS, e)
+        self.assertIn("alternating  median    104.5s  (n=10)", out)
+        self.assertEqual(result["verdict"], "PROCEED")
+
+    def test_holm_can_remove_a_marginal_pair(self):
+        # four orderings, only one weak difference: the uncorrected CI may exclude 0,
+        # but G5 must pass only if a pair survives Holm across all 6 pairs
+        runs = []
+        for i in range(8):
+            for mode, bump in (("alternating", 0.0), ("hot_first", 0.0), ("cool_first", 0.0),
+                               ("random", 0.9)):
+                runs.append({"mode": mode, "valid": True, "time_above_knee_s": 100 + i,
+                             "p99_ms": 300 + (i % 4) * 0.5 + bump, "p95_ms": 290.0,
+                             "mean_ms": 250.0, "throughput_jobs_s": 4.0})
+        e = make_e3(runs=runs, orderings=["alternating", "hot_first", "cool_first", "random"])
+        result, out = run(E1_KNEE, E2_PASS, e)
+        self.assertIn("P99 pairs surviving Holm", out)
+        pvals = [an.boot_diff([r["p99_ms"] for r in runs if r["mode"] == a],
+                              [r["p99_ms"] for r in runs if r["mode"] == b])["p_value"]
+                 for a, b in (("alternating", "cool_first"), ("alternating", "hot_first"),
+                              ("alternating", "random"), ("cool_first", "hot_first"),
+                              ("cool_first", "random"), ("hot_first", "random"))]
+        self.assertEqual(result["gates"]["G5_outcome"], any(an.holm(pvals)))
 
 
 class OverallVerdict(unittest.TestCase):

@@ -1,7 +1,8 @@
 """
-Regression tests for exp3_ordering.py: where the time-above-knee threshold
-may come from, the workload-validation prerequisite, and refusal of an
-invalid confirmatory run.
+Regression tests for exp3_ordering.py (Amendment A7): where the time-above-knee
+threshold may come from, the workload-validation prerequisite, refusals before
+any load, the A7 session (cooldown, pre-heat, validity, reruns) with fakes, and
+a mock session through analyze.py.
 
     python3 -m unittest -v test_exp3_ordering
 
@@ -14,12 +15,16 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
+import analyze as an
 import exp3_ordering as e3
+import monitor_guard as mg
 import validate_workload as vw
 import workload as wl
 from test_analyze import (E1_4CORE, E1_KNEE, E1_KNEE_PARTIAL,
@@ -75,40 +80,6 @@ class ThresholdComesOnlyFromValidExp1(unittest.TestCase):
         self.assertEqual((th["knee_c"], th["confirmatory"]), (80.2, False))
 
 
-class FakeHardware:
-    name = "fakehw"
-    caps = {}
-
-    def read(self):
-        return {"t_wall": 0.0, "temp_c": 48.0, "freq_mhz": 1800.0,
-                "throttled": 0, "energy_uj": None}
-
-
-def run_main(outdir, *extra):
-    argv = ["exp3_ordering.py", "--outdir", outdir, *extra]
-    buf = io.StringIO()
-    with mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(buf):
-        rc = e3.main()
-    return rc, buf.getvalue()
-
-
-class InvalidConfirmatoryRunIsRefused(unittest.TestCase):
-
-    def test_real_backend_without_valid_exp1_knee_refuses_before_any_load(self):
-        d = outdir_with(E1_4CORE, E2_KNEE)
-        boom = mock.Mock(side_effect=AssertionError("workload must not run"))
-        with mock.patch.object(e3.sensors, "get_backend",
-                               return_value=FakeHardware()), \
-                mock.patch.object(e3.wl, "FixedWorkPool", boom):
-            rc, out = run_main(d, "--reps", "1", "--k", "4", "--parallel", "4",
-                               "--workload-validation", write_report(make_report()))
-        self.assertEqual(rc, 2)
-        self.assertIn("REFUSING TO RUN: no valid Experiment 1 knee", out)
-        self.assertIn("exp2 observed a frequency drop from 79.0 C", out)
-        boom.assert_not_called()
-        self.assertFalse(os.path.exists(os.path.join(d, "exp3.meta.json")))
-
-
 def _sha_workload():
     with open(wl.__file__, "rb") as f:
         return hashlib.sha256(f.read()).hexdigest()
@@ -134,28 +105,6 @@ def write_report(rep):
     with os.fdopen(fd, "w") as f:
         json.dump(rep, f)
     return path
-
-
-class FakePool:
-    """Stands in for workload.FixedWorkPool: records specs, no processes."""
-    instances = []
-
-    def __init__(self, P, **kw):
-        self.P, self.specs, self.stopped = P, [], False
-        FakePool.instances.append(self)
-
-    def run_job(self, spec, record_units=False):
-        self.specs.append(spec)
-        cpu = 200.0 * spec.P * (1.0 if spec.name == "HOT" else 0.35)
-        return {"latency_ms": 200.0, "units_planned": spec.planned_units,
-                "units_done": spec.planned_units, "cpu_ms": cpu, "compute_ms": cpu,
-                "sleep_req_ms": spec.planned_sleep_ms,
-                "sleep_actual_ms": spec.planned_sleep_ms,
-                "realized_duty": cpu / (200.0 * spec.P), "overhead_ms": 1.0,
-                "imbalance": 0.01, "skew_ms": 0.1}
-
-    def stop(self):
-        self.stopped = True
 
 
 class WorkloadValidationGate(unittest.TestCase):
@@ -271,87 +220,282 @@ class WorkloadValidationGate(unittest.TestCase):
         self.assertFalse(info["accepted"])
 
 
-class RealHardwareRunsWithFakes(unittest.TestCase):
+def p4c_report():
+    rep = WorkloadValidationGate.p4b_report()
+    cfg = rep["configs"].pop("4b")
+    cfg["frozen"]["params_id"] = "P4c-F1"
+    rep["configs"]["4c"] = cfg
+    return rep
 
-    def patched(self, outdir, *extra):
-        FakePool.instances.clear()
-        with mock.patch.object(e3.sensors, "get_backend", return_value=FakeHardware()), \
-                mock.patch.object(e3.wl, "FixedWorkPool", FakePool):
-            return run_main(outdir, *extra)
 
-    def test_valid_knee_without_validation_refuses_before_any_load(self):
-        rc, out = self.patched(outdir_with(E1_KNEE, None), "--parallel", "4",
-                               "--reps", "1", "--k", "4")
+class FakePi:
+    name = "raspberrypi"
+
+
+def run_main(argv):
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = e3.main(argv)
+    return rc, buf.getvalue()
+
+
+class A7Refusals(unittest.TestCase):
+    """Real hardware: every refusal comes before any file or load."""
+
+    def setUp(self):
+        self.out = os.path.join(tempfile.mkdtemp(prefix="exp3_test_"), "run")
+        self.e1 = os.path.join(outdir_with(E1_KNEE, None), "exp1.meta.json")
+        for target, value in ((e3.sensors, "get_backend"),):
+            p = mock.patch.object(target, value, return_value=FakePi())
+            p.start()
+            self.addCleanup(p.stop)
+        self.boom = mock.patch.object(e3.wl, "FixedWorkPool",
+                                      side_effect=AssertionError("no load may start"))
+        self.boom.start()
+        self.addCleanup(self.boom.stop)
+
+    def argv(self, *extra, e1=None, report=None):
+        return ["--outdir", self.out, "--require-monitor", "1", "--exp1-meta", e1 or self.e1,
+                "--workload-validation", report or write_report(p4c_report()), *extra]
+
+    def test_require_monitor_is_mandatory(self):
+        rc, out = run_main(["--outdir", self.out])
         self.assertEqual(rc, 2)
-        self.assertIn("REFUSING TO RUN: no workload validation report", out)
-        self.assertEqual(FakePool.instances, [])
+        self.assertIn("--require-monitor SECONDS is mandatory", out)
+        self.assertFalse(os.path.exists(self.out))
 
-    def test_valid_knee_with_rejected_validation_refuses(self):
-        rc, out = self.patched(outdir_with(E1_KNEE, None), "--parallel", "4",
-                               "--workload-validation",
-                               write_report(make_report(status=vw.REJECTED)))
+    def test_g1_must_pass(self):
+        bad = os.path.join(outdir_with(E1_4CORE, None), "exp1.meta.json")
+        rc, out = run_main(self.argv(e1=bad))
         self.assertEqual(rc, 2)
-        self.assertIn("REJECTED", out)
-        self.assertEqual(FakePool.instances, [])
+        self.assertIn("does not pass G1", out)
+        self.assertFalse(os.path.exists(self.out))
 
-    def test_p4b_is_refused_before_any_load_until_amendment_a4(self):
-        rep = WorkloadValidationGate.p4b_report()
-        rc, out = self.patched(outdir_with(E1_KNEE, None), "--parallel", "4",
-                               "--workload-config", "4b", "--reps", "1", "--k", "4",
-                               "--workload-validation", write_report(rep))
+    def test_only_an_accepted_p4c_validation(self):
+        for name, rep in (("plain P=4", make_report(P=4)),
+                          ("P4b", WorkloadValidationGate.p4b_report()),
+                          ("P4c rejected", {**p4c_report(), "configs": {"4c": {
+                              **p4c_report()["configs"]["4c"], "status": vw.REJECTED}}})):
+            with self.subTest(case=name):
+                rc, out = run_main(self.argv(report=write_report(rep)))
+                self.assertEqual(rc, 2)
+                self.assertIn("refused: workload:", out)
+                self.assertFalse(os.path.exists(self.out))
+
+    def test_no_watchdog_means_no_load_and_an_aborted_record(self):
+        with mock.patch.object(e3.e1t, "measure_idle_baseline") as idle:
+            rc, out = run_main(self.argv())
         self.assertEqual(rc, 2)
-        self.assertIn("Amendment A4", out)
-        self.assertEqual(FakePool.instances, [])
-
-    def test_accepted_validation_and_valid_knee_run_fixed_work_jobs(self):
-        d = outdir_with(E1_KNEE, E2_KNEE)
-        rc, out = self.patched(d, "--parallel", "4", "--reps", "1", "--k", "4",
-                               "--orderings", "hot_first,alternating",
-                               "--workload-validation", write_report(make_report()))
-        self.assertIn(rc, (None, 0))
-        pool = FakePool.instances[0]
-        self.assertTrue(pool.stopped)
-        self.assertTrue(all(s.P == 4 for s in pool.specs))
-        self.assertEqual({(s.name, s.units_per_shard, s.sleep_per_shard_ms)
-                          for s in pool.specs},
-                         {("HOT", 50, 0.0), ("COOL", 18, 118.0)})
-        with open(os.path.join(d, "exp3.meta.json")) as f:
+        self.assertIn("[exp3] run run: waiting up to 1 s for a verified watchdog", out)
+        idle.assert_not_called()
+        with open(os.path.join(self.out, "exp3.start.json")) as f:
+            self.assertEqual(set(json.load(f)["sha256"]), set(e3.EXP3_HASHED))
+        with open(os.path.join(self.out, "exp3.meta.json")) as f:
             meta = json.load(f)
-        self.assertTrue(meta["workload"]["accepted"])
-        self.assertEqual(meta["cold_latency_match"]["gap_class"], vw.TARGET)
-        self.assertTrue(meta["planned_identical_across_runs"])
-        self.assertFalse(meta["energy_measured"])
-        self.assertEqual(meta["knee_c"], 80.2)
-        self.assertTrue(all(r["achieved"]["units_done"] == r["planned"]["units"]
-                            for r in meta["runs"]))
+        self.assertEqual((meta["amendment"], meta["k_jobs"], meta["start_c"]), ("A7", 600, 77.0))
+        self.assertIn("refused: monitoring not established", meta["abort_reason"])
+        self.assertIn("aborted", an.e3_invalid(meta))
+        self.assertEqual(run_main(self.argv())[0], 2)                # never overwrite a run
 
 
-class MockEndToEnd(unittest.TestCase):
-    """Simulated mock device: sleep-based, no CPU load."""
+class Thermal:
+    """Fake die: HOT +0.8 C and COOL +0.2 C per job; each idle poll cools 2 C (not below 40)."""
+    name = "fake"
 
-    def test_no_valid_knee_marks_threshold_metrics_unavailable(self):
-        d = outdir_with(E1_4CORE, E2_KNEE)
-        rc, out = run_main(d, "--backend", "mock", "--reps", "1", "--k", "4",
-                           "--orderings", "hot_first,alternating")
-        self.assertIn(rc, (None, 0))
-        with open(os.path.join(d, "exp3.meta.json")) as f:
+    def __init__(self, temp=40.0):
+        self.temp = temp
+
+    def read(self):
+        return {"t_wall": time.monotonic(), "temp_c": round(self.temp, 3), "freq_mhz": 1800.0,
+                "throttled": 0}
+
+    def quick(self):
+        return {"temp_c": round(self.temp, 3), "freq_mhz": 1800.0}
+
+
+class TPool:
+    made = 0
+
+    def __init__(self, b, fail_at=None, short_at=None, alive=True):
+        TPool.made += 1
+        self.b, self.n, self.fail_at, self.short_at, self._alive = b, 0, fail_at, short_at, alive
+        self.stopped, self.unstopped, self.specs = False, [], []
+
+    def alive(self):
+        return self._alive and not self.stopped
+
+    def run_job(self, spec, record_units=False):
+        self.n += 1
+        self.specs.append(spec)
+        if self.fail_at == self.n:
+            raise wl.JobTimeout("no reply from shard(s) [1]")
+        self.b.temp += 0.8 if spec.name == "HOT" else 0.2
+        done = spec.planned_units - (1 if self.short_at == self.n else 0)
+        lat = 196.0 + (12.0 if self.b.temp >= 80.8 else 0.0)
+        return {"latency_ms": lat, "units_planned": spec.planned_units, "units_done": done,
+                "cpu_ms": 780.0, "compute_ms": 770.0, "sleep_req_ms": spec.planned_sleep_ms,
+                "sleep_actual_ms": spec.planned_sleep_ms, "realized_duty": 0.99,
+                "overhead_ms": 1.0, "nivcsw": 3}
+
+    def stop(self):
+        self.stopped = True
+        return []
+
+
+HOT4 = wl.JobSpec("HOT", 4, 128, 13, 0.0, 4)
+COOL4 = wl.JobSpec("COOL", 4, 128, 5, 119.55, 4)
+
+
+def session(pool_kw=None, flags=None, check=None, temp=40.0, **plan_kw):
+    b = Thermal(temp)
+    pools = []
+
+    def make_pool():
+        p = TPool(b, **(pool_kw or {}) if not pools else {})
+        pools.append(p)
+        return p
+
+    def sleep(s):
+        b.temp = max(40.0, b.temp - 2.0)
+    base = dict(k=10, hot_frac=0.5, reps=2, orderings=("hot_first", "alternating"), start_c=60.0,
+                preheat_cap_s=5.0, idle_c=40.0, margin_c=3.0, cooldown_cap_s=5.0, hz=50.0,
+                poll_s=0.0, seed=0)
+    base.update(plan_kw)
+    s = e3.Session(b, make_pool, HOT4, COOL4, e3.Plan(**base), 80.828, check=check,
+                   flags=flags or (lambda: 0x0), quick=b.quick, log=lambda m: None, sleep=sleep)
+    return s.run(), pools, b
+
+
+class A7Session(unittest.TestCase):
+    def test_complete_valid_session(self):
+        s, pools, _ = session()
+        self.assertTrue(s.session_complete)
+        self.assertIsNone(s.abort_reason)
+        self.assertEqual(len(pools), 1)
+        self.assertTrue(pools[0].stopped)
+        self.assertEqual([(r["rep"], r["mode"]) for r in s.runs], [tuple(x) for x in s.schedule])
+        self.assertEqual(sorted(m for _, m in s.schedule), ["alternating"] * 2 + ["hot_first"] * 2)
+        self.assertEqual({r for r, _ in s.schedule[:2]}, {0})      # interleaved: rep 0 first
+        for r in s.runs:
+            self.assertTrue(r["valid"], r)
+            self.assertEqual(r["n_jobs"], 10)
+            self.assertGreaterEqual(r["start_temp_c"], 60.0)        # pre-heated
+            self.assertGreater(r["preheat_jobs"], 0)
+            self.assertEqual(r["planned"], s.planned)               # identical multiset (A2)
+            self.assertIsNotNone(r["time_above_knee_s"])
+            self.assertEqual(r["achieved"]["units_done"], 5 * 52 + 5 * 20)   # HOT 4x13, COOL 4x5
+        self.assertEqual(len(s.jobs), 40)
+        self.assertTrue(all("throttled_after" in j for j in s.jobs))
+
+    def test_sequence_jobs_follow_the_ordering(self):
+        s, _, _ = session(reps=1, orderings=("hot_first", "cool_first", "alternating"))
+        by = {r["mode"]: [j["class"] for j in s.jobs if j["run_index"] == r["run_index"]]
+              for r in s.runs}
+        self.assertEqual(by["hot_first"], ["HOT"] * 5 + ["COOL"] * 5)
+        self.assertEqual(by["cool_first"], ["COOL"] * 5 + ["HOT"] * 5)
+        self.assertEqual(by["alternating"][:4], ["HOT", "COOL", "HOT", "COOL"])
+
+    def test_preheat_cap_makes_the_sequence_invalid_and_it_is_rerun_once(self):
+        s, _, _ = session(start_c=999.0, preheat_cap_s=-1.0, reps=1)   # cap hit at once
+        self.assertTrue(s.session_complete)
+        self.assertEqual(len(s.runs), 4)                            # 2 + 2 reruns
+        self.assertTrue(all(not r["valid"] and "pre-heat did not reach" in r["invalid_reason"]
+                            for r in s.runs))
+        self.assertEqual([r["rerun_of"] for r in s.runs], [None, None, 0, 1])
+
+    def test_cooldown_cap(self):
+        s, _, _ = session(temp=90.0, cooldown_cap_s=0.0, reps=1, idle_c=10.0, margin_c=0.0)
+        self.assertTrue(all("cooldown:" in r["invalid_reason"] for r in s.runs))
+        self.assertTrue(s.session_complete)
+
+    def test_job_timeout_restarts_the_pool_and_the_rerun_counts(self):
+        s, pools, _ = session(pool_kw={"fail_at": 3}, reps=1)
+        self.assertEqual(len(pools), 2)                             # replaced after the timeout
+        self.assertTrue(pools[0].stopped and pools[1].stopped)
+        bad = [r for r in s.runs if not r["valid"]]
+        self.assertEqual(len(bad), 1)
+        self.assertIn("JobTimeout", bad[0]["invalid_reason"])
+        rerun = [r for r in s.runs if r["rerun_of"] == bad[0]["run_index"]]
+        self.assertEqual(len(rerun), 1)
+        self.assertTrue(rerun[0]["valid"])
+
+    def test_short_job_is_invalid(self):
+        s, _, _ = session(pool_kw={"short_at": 30}, reps=1)
+        self.assertTrue(any("did 51 of 52 units" in (r["invalid_reason"] or "") for r in s.runs))
+
+    def test_undervoltage_stops_the_session(self):
+        n = {"k": 0}
+
+        def flags():
+            n["k"] += 1
+            return 0x10001 if n["k"] == 25 else 0x0
+        s, pools, _ = session(flags=flags)
+        self.assertTrue(s.undervoltage)
+        self.assertIn("under-voltage", s.abort_reason)
+        self.assertFalse(s.session_complete)
+        self.assertTrue(pools[0].stopped)
+        meta = {"amendment": "A7", "abort_reason": s.abort_reason, "session_complete": False}
+        self.assertIn("aborted", an.e3_invalid(meta))
+
+    def test_live_flags_before_a_sequence_make_it_invalid(self):
+        n = {"k": 0}
+
+        def flags():
+            n["k"] += 1
+            return 0x4 if n["k"] == 1 else 0x0
+        s, _, _ = session(flags=flags, reps=1)
+        self.assertIn("live throttle flags before the sequence", s.runs[0]["invalid_reason"])
+        self.assertEqual(sum(r["valid"] for r in s.runs), 2)        # the rerun is valid
+
+    def test_lost_watchdog_interrupts(self):
+        n = {"k": 0}
+
+        def check():
+            n["k"] += 1
+            if n["k"] == 40:
+                raise mg.MonitorLost("watchdog lost: monitor.log missing")
+        s, pools, _ = session(check=check)
+        self.assertIn("watchdog lost", s.interrupted)
+        self.assertFalse(s.session_complete)
+        self.assertTrue(pools[0].stopped)
+        self.assertEqual(s.runs[-1]["invalid_reason"], "interrupted")
+
+    def test_no_rerun_option(self):
+        s, _, _ = session(start_c=999.0, preheat_cap_s=-1.0, reps=1, rerun_invalid=False)
+        self.assertEqual(len(s.runs), 2)
+
+
+class A7MockEndToEnd(unittest.TestCase):
+    """Simulated mock device (sleep-based, no CPU load): the whole pipeline into analyze."""
+
+    def test_session_into_analyze(self):
+        out = os.path.join(tempfile.mkdtemp(prefix="exp3_mock_"), "m")
+        rc, text = run_main(["--backend", "mock", "--reps", "8", "--k", "40",
+                             "--orderings", "hot_first,cool_first", "--mock-tau", "1.5",
+                             "--mock-job-ms", "50", "--idle-window-s", "0.3", "--outdir", out])
+        self.assertEqual(rc, 0, text)
+        with open(os.path.join(out, "exp3.meta.json")) as f:
             meta = json.load(f)
-        self.assertIsNone(meta["knee_c"])
-        self.assertFalse(meta["time_above_knee_available"])
-        self.assertFalse(meta["threshold"]["confirmatory"])
-        self.assertIn("79.0 C", meta["threshold"]["exp2_knee_support"])
-        self.assertTrue(all(r["time_above_knee_s"] is None for r in meta["runs"]))
-
-    def test_valid_exp1_knee_is_used_on_mock(self):
-        d = outdir_with(E1_KNEE, E2_KNEE)
-        rc, out = run_main(d, "--backend", "mock", "--reps", "1", "--k", "4",
-                           "--orderings", "hot_first,alternating")
-        with open(os.path.join(d, "exp3.meta.json")) as f:
-            meta = json.load(f)
-        self.assertEqual(meta["knee_c"], 80.2)
-        self.assertEqual(meta["threshold"]["knee_source"], "exp1 (G1 PASS)")
-        self.assertTrue(all(r["time_above_knee_s"] is not None
-                            for r in meta["runs"]))
+        self.assertEqual(meta["a7_validity"], "valid")
+        self.assertTrue(meta["session_complete"])
+        self.assertEqual(meta["n_valid"], {"hot_first": 8, "cool_first": 8})
+        self.assertIn("MOCK, NOT A RESULT", text)
+        tak = {m: [r["time_above_knee_s"] for r in meta["runs"] if r["mode"] == m]
+               for m in ("hot_first", "cool_first")}
+        self.assertGreater(min(tak["hot_first"]), max(tak["cool_first"]))   # mock physics
+        d = os.path.dirname(out)
+        shutil.copy(os.path.join(out, "exp3.meta.json"), d)
+        with open(os.path.join(d, "exp1.meta.json"), "w") as f:
+            json.dump(E1_KNEE, f)
+        with open(os.path.join(d, "exp2.meta.json"), "w") as f:
+            json.dump(E2_PASS, f)
+        buf = io.StringIO()
+        with mock.patch.object(sys, "argv", ["analyze.py", "--outdir", d]), \
+                contextlib.redirect_stdout(buf):
+            result = an.main()
+        self.assertTrue(result["gates"]["G4_mediator"])
+        self.assertIsNotNone(result["gates"]["G5_outcome"])
+        self.assertIn("P99 pairs surviving Holm", buf.getvalue())
 
 
 if __name__ == "__main__":
