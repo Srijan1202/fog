@@ -1,5 +1,10 @@
 # TDAS Hardware Pilot — Execution Kit
 
+> **Pilot status: CLOSED on 2026-10-18. Pre-registered verdict: LIKELY KILL.** G1–G4 passed and G5 failed:
+> ordering changes the thermal trajectory, but not tail latency, mean latency or throughput. The negative
+> result is retained. A follow-up needs its own pre-registered hypothesis and success criteria first. See
+> `provenance/PILOT_CLOSURE_20261018.md`.
+
 Falsification-first. The goal is to **kill TDAS cheaply** if the physics
 doesn't hold on your hardware. Experiment 2 alone can end this in an
 afternoon.
