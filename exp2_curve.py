@@ -23,6 +23,15 @@ Experiment 2 therefore measures s(T) under its own four-core load:
     temperature in 2 C bins per ramp (>= 20 jobs), cluster bootstrap over
     (ramp, bin). Validity as A4 section 4.
 
+A5 (AMENDMENT_A5_exp2.md): four cores heat the die from ~46 C to 70 C in about
+12 s, so below knee - 10 C each 2 C bin got fewer than 20 jobs (run
+exp2-a4-20261018-01). Each ramp now starts with a paced warm-up (Pacer): below
+G1 knee - 10 C the next job is dispatched only while the temperature is under
+the top of the lowest bin that has fewer than 30 jobs; otherwise no load until
+it is. When those bins are full (or 300 s after the ramp starts) the jobs run
+back to back for the rest of the 12 min. The job and the analysis are unchanged.
+--no-pace gives the A4 procedure.
+
 On real hardware it refuses, before creating any file or starting any load,
 unless Experiment 1 passes G1 (--exp1-meta), the P4c validation is ACCEPTED
 (--workload-validation) and the mailbox clock reads. --require-monitor is
@@ -50,6 +59,7 @@ import argparse
 import bisect
 import hashlib
 import json
+import math
 import os
 import signal
 import sys
@@ -94,6 +104,56 @@ class Plan:
     max_temp: float | None = None
     poll_s: float = 2.0
     progress_s: float = 60.0
+    # Amendment A5: paced warm-up below pace_limit_c (= G1 knee - 10 C). None = no pacing.
+    pace_limit_c: float | None = None
+    pace_quota: int = 30
+    pace_cap_s: float = 300.0
+    pace_poll_s: float = 0.05
+
+
+class Pacer:
+    """Amendment A5. Below `limit_c` the next job is dispatched only while the
+    temperature is under a setpoint: the top edge of the lowest 2 C bin (from the
+    ramp's start bin up) that has fewer than `quota` jobs. The bin's jobs are
+    counted by the temperature before dispatch, as G2 bins them. Paced bins are
+    those lying wholly at or below the limit (b + 2 <= limit_c). When all are
+    full, setpoint() returns None and the jobs run back to back."""
+
+    def __init__(self, limit_c, quota=30, bin_c=2.0):
+        if quota < 1:
+            raise ValueError("quota must be >= 1")
+        self.limit, self.quota, self.bin_c = limit_c, quota, bin_c
+        self.start_bin, self.counts = None, {}
+
+    def _bin(self, t):
+        return math.floor(t / self.bin_c) * self.bin_c
+
+    def setpoint(self, t):
+        if self.start_bin is None:
+            if t is None:
+                return None
+            self.start_bin = self._bin(t)
+        b = self.start_bin
+        while b + self.bin_c <= self.limit:
+            if self.counts.get(b, 0) < self.quota:
+                return b + self.bin_c
+            b += self.bin_c
+        return None
+
+    def count(self, t):
+        if t is not None:
+            b = self._bin(t)
+            self.counts[b] = self.counts.get(b, 0) + 1
+
+    def filled(self):
+        """Paced bins (from the start bin) and their job counts."""
+        if self.start_bin is None:
+            return {}
+        out, b = {}, self.start_bin
+        while b + self.bin_c <= self.limit:
+            out[b] = self.counts.get(b, 0)
+            b += self.bin_c
+        return out
 
 
 class Exp2Guard(mg.MonitorGuard):
@@ -240,12 +300,17 @@ class Ramps:
         sampler = fwclock.ClockSampler(self.clock, hz=p.clock_hz, jitter=p.clock_jitter,
                                        seed=p.seed + r)
         n0, t_ramp = len(self.jobs), time.monotonic()
+        pacer = Pacer(p.pace_limit_c, p.pace_quota) if p.pace_limit_c is not None else None
+        pacing, wait_from, powered = pacer is not None, None, False
+        pace = {"limit_c": p.pace_limit_c, "quota": p.pace_quota, "cap_s": p.pace_cap_s,
+                "paced_jobs": 0, "wait_s": 0.0, "end_s": None,
+                "end_reason": None if pacer else "off"}
+        info["pacing"] = pace
         self.log(f"[exp2] ramp {r}: start at {info['start_temp_c']:.1f} C after "
-                 f"{waited:.0f} s; HOT jobs back to back for {p.ramp_s / 60:g} min")
+                 f"{waited:.0f} s; HOT jobs for {p.ramp_s / 60:g} min"
+                 + (f", paced below {p.pace_limit_c:.1f} C (A5)" if pacer else ", back to back"))
         end, next_note = t_ramp + p.ramp_s, t_ramp + p.progress_s
         try:
-            if self.power:
-                self.power(True)
             logger.start()
             sampler.start()
             while time.monotonic() < end:
@@ -255,14 +320,41 @@ class Ramps:
                 if p.max_temp is not None and tb is not None and tb >= p.max_temp:
                     self._abort(f"max_temp: {tb:.1f} C >= {p.max_temp} C")
                     break
+                if pacing and tb is not None:
+                    sp, now = pacer.setpoint(tb), time.monotonic()
+                    if sp is None or now - t_ramp >= p.pace_cap_s:
+                        pacing = False
+                        pace.update(end_s=round(now - t_ramp, 1),
+                                    end_reason="filled" if sp is None else "cap")
+                        self.log(f"[exp2] ramp {r}: paced warm-up ended at {now - t_ramp:.0f} s "
+                                 f"({pace['end_reason']}): {pace['paced_jobs']} paced jobs, "
+                                 f"{pace['wait_s']:.0f} s of waits; back to back from here")
+                    elif tb >= sp:            # A5: no load until below the setpoint
+                        if wait_from is None:
+                            wait_from = now
+                        if self.power and powered:
+                            self.power(False)
+                            powered = False
+                        self.sleep(p.pace_poll_s)
+                        continue
                 if not self.pool.alive():
                     raise wl.WorkerFailure("pool lost a worker during the ramp")
+                if self.power and not powered:
+                    self.power(True)
+                    powered = True
                 ta = time.monotonic()
                 rec = self.pool.run_job(self.hot)
                 tz = time.monotonic()
+                wait_ms = (ta - wait_from) * 1000.0 if wait_from is not None else 0.0
                 rec.update(ramp=r, seq=len(self.jobs), ramp_seq=len(self.jobs) - n0,
                            t_start=ta, t_end=tz, temp_before_c=tb,
-                           freq_before_mhz=q.get("freq_mhz"))
+                           freq_before_mhz=q.get("freq_mhz"),
+                           paced=pacing, wait_ms=round(wait_ms, 1))
+                if pacing:
+                    pacer.count(tb)
+                    pace["paced_jobs"] += 1
+                    pace["wait_s"] = round(pace["wait_s"] + wait_ms / 1000.0, 3)
+                wait_from = None
                 self.jobs.append(rec)
                 if rec.get("units_done") != rec.get("units_planned"):
                     self.jobs_complete = False
@@ -294,6 +386,10 @@ class Ramps:
             temps = [s["temp_c"] for s in tele if s.get("temp_c") is not None]
             info.update(jobs=len(self.jobs) - n0, wall_s=round(time.monotonic() - t_ramp, 1),
                         peak_temp_c=max(temps) if temps else None, clock_reads=len(samples))
+            if pacer is not None:
+                if pacing:                    # still pacing when the ramp ended or stopped
+                    pace.update(end_s=round(time.monotonic() - t_ramp, 1), end_reason="ramp ended")
+                pace["bins"] = {f"{b:g}": n for b, n in pacer.filled().items()}
         th1 = self.flags()
         info["flags_after"] = hex(th1) if th1 is not None else None
         why = self._flag_problem(th1, f"after ramp {r}")
@@ -353,6 +449,19 @@ def mediation(jobs, step_mhz=50.0):
     for lv in levels:
         lv["predicted_ms"] = ref["latency_median_ms"] * ref["clock_mhz"] / lv["clock_mhz"]
     return {"jobs_with_clock": len(pts), "step_mhz": step_mhz, "levels": levels}
+
+
+def pacing_latency(jobs, knee_c):
+    """A5, descriptive only: median latency of paced jobs (all, and those dispatched
+    after an idle wait) against unpaced jobs still below the knee. Never used by G2."""
+    def summ(v):
+        v = sorted(v)
+        return {"n": len(v), "latency_median_ms": round(v[len(v) // 2], 2) if v else None}
+    paced = [j["latency_ms"] for j in jobs if j.get("paced")]
+    waited = [j["latency_ms"] for j in jobs if j.get("paced") and (j.get("wait_ms") or 0) > 0]
+    b2b = [j["latency_ms"] for j in jobs if not j.get("paced") and knee_c is not None
+           and j.get("temp_before_c") is not None and j["temp_before_c"] < knee_c]
+    return {"paced": summ(paced), "after_wait": summ(waited), "back_to_back_below_knee": summ(b2b)}
 
 
 def support_knee(samples, tele, max_gap_s=0.5):
@@ -478,6 +587,12 @@ def build_args(argv=None):
     ap.add_argument("--seed", type=int, default=0, help="clock jitter seed (ramp r uses seed + r)")
     ap.add_argument("--max-temp", type=float, default=None,
                     help="stop the run (ABORTED) if the temperature before a job reaches this")
+    ap.add_argument("--pace-quota", type=int, default=30,
+                    help="A5: jobs per 2 C bin below G1 knee - 10 C before the setpoint moves up")
+    ap.add_argument("--pace-cap-s", type=float, default=300.0,
+                    help="A5: pacing ends at most this long after the ramp starts")
+    ap.add_argument("--no-pace", action="store_true",
+                    help="A4 procedure without the A5 paced warm-up (jobs back to back throughout)")
     ap.add_argument("--require-monitor", type=float, default=None, metavar="SECONDS",
                     help="MANDATORY on real hardware (tools/launch_exp2.sh passes it): fresh "
                          "--outdir, no load until a verified tools/exp2_monitor.sh")
@@ -580,7 +695,9 @@ def _run(args, b, is_mock, ctx, root, guard, check):
                 margin_c=args.margin_c, cooldown_cap_s=args.cooldown_cap_s, hz=args.hz,
                 clock_hz=args.clock_hz, clock_jitter=args.clock_jitter, seed=args.seed,
                 max_temp=args.max_temp, poll_s=0.5 if is_mock else 2.0,
-                progress_s=10.0 if is_mock else 60.0)
+                progress_s=10.0 if is_mock else 60.0,
+                pace_limit_c=None if args.no_pace else ctx["g1"]["knee_c"] - analyze.G2_RULE["below_knee_c"],
+                pace_quota=args.pace_quota, pace_cap_s=args.pace_cap_s)
     pool = power = None
     try:
         if is_mock:
@@ -613,6 +730,7 @@ def _run(args, b, is_mock, ctx, root, guard, check):
     knee = support_knee(ramps.clock_samples, ramps.tele)
     meta = {
         "experiment": "exp2_curve", "amendment": AMENDMENT,
+        "procedure": "A4" if plan.pace_limit_c is None else "A4+A5 paced warm-up",
         "backend": b.name, "mock": is_mock,
         "workload": _workload_record(ctx["workload"]),
         "g1": ctx["g1"], "g1_knee_c": ctx["g1"]["knee_c"],
@@ -627,6 +745,7 @@ def _run(args, b, is_mock, ctx, root, guard, check):
         "clock": ck,
         "bins": analyze.g2_bins(ramps.jobs),
         "mediation": mediation(ramps.jobs),            # descriptive only
+        "pacing_latency": pacing_latency(ramps.jobs, ctx["g1"]["knee_c"]),   # descriptive (A5)
         "knee": knee,                                  # supporting evidence only
         "knee_c": knee.get("knee_c") if knee else None,
         "unstopped_workers": list(getattr(pool, "unstopped", None) or []),
@@ -646,6 +765,16 @@ def _run(args, b, is_mock, ctx, root, guard, check):
     for ri in ramps.ramp_info:
         print(f"  ramp {ri['ramp']}: start {ri.get('start_temp_c')} C, peak {ri.get('peak_temp_c')} C, "
               f"{ri.get('jobs')} jobs, flags {ri.get('flags_before')} -> {ri.get('flags_after')}")
+        pc = ri.get("pacing")
+        if pc and pc.get("end_reason") != "off":
+            print(f"    paced warm-up (A5): {pc['paced_jobs']} jobs, {pc['wait_s']:.0f} s of waits, "
+                  f"ended at {pc['end_s']} s ({pc['end_reason']}); jobs per paced bin {pc.get('bins')}")
+    pl = meta["pacing_latency"]
+    if pl["paced"]["n"]:
+        print(f"paced vs back-to-back jobs (descriptive): median {pl['paced']['latency_median_ms']:.1f} ms "
+              f"(n {pl['paced']['n']}, after a wait: {pl['after_wait']['latency_median_ms']} ms, "
+              f"n {pl['after_wait']['n']}) vs {pl['back_to_back_below_knee']['latency_median_ms']} ms "
+              f"(back to back below the knee, n {pl['back_to_back_below_knee']['n']})")
     print(f"ARM clock          : {ck['readable']} of {ck['reads']} reads readable "
           f"({ck['source']})")
     print(f"kept bins          : {len(meta['bins'])} (2 C, >= 20 jobs, per ramp)")

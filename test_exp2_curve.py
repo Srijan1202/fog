@@ -220,6 +220,120 @@ class RampLoop(unittest.TestCase):
         self.assertEqual((r.jobs, power), ([], []))
 
 
+class PacerRule(unittest.TestCase):
+    """Amendment A5: setpoint = top of the lowest bin (from the start bin) with < quota jobs."""
+
+    def test_setpoint_moves_up_as_bins_fill(self):
+        p = e2.Pacer(70.8, quota=2)
+        self.assertEqual(p.setpoint(46.7), 48.0)          # start bin 46
+        p.count(46.7)
+        self.assertEqual(p.setpoint(47.9), 48.0)
+        p.count(47.9)
+        self.assertEqual(p.setpoint(47.0), 50.0)          # bin 46 full
+        p.count(44.5)                                     # below the start bin: counted, not paced
+        self.assertEqual(p.setpoint(45.0), 50.0)
+
+    def test_last_paced_bin_lies_wholly_below_the_limit(self):
+        p = e2.Pacer(70.8, quota=1)
+        p.setpoint(66.1)
+        self.assertEqual(p.filled(), {66.0: 0, 68.0: 0})  # 70-72 is not wholly <= 70.8
+        p.count(66.5)
+        self.assertEqual(p.setpoint(67.0), 70.0)
+        p.count(68.3)
+        self.assertIsNone(p.setpoint(69.0))               # all paced bins full
+
+    def test_start_above_the_limit_means_no_pacing(self):
+        self.assertIsNone(e2.Pacer(70.8).setpoint(71.0))
+
+    def test_unknown_start_temperature_does_not_fix_the_start_bin(self):
+        p = e2.Pacer(70.8)
+        self.assertIsNone(p.setpoint(None))
+        self.assertEqual(p.setpoint(50.2), 52.0)
+
+    def test_quota_must_be_positive(self):
+        with self.assertRaises(ValueError):
+            e2.Pacer(70.8, quota=0)
+
+
+class ThermalFake(FakeBackend):
+    """Heats 0.6 C per job; each read while no job runs cools it 0.3 C (not below 44)."""
+
+    def quick(self):
+        return {"temp_c": round(self.temp, 3), "freq_mhz": 1800.0}
+
+
+class ThermalPool(FakePool):
+    def run_job(self, spec, record_units=False):
+        rec = super().run_job(spec)
+        self.b.temp += -1.0 + 0.6                         # FakePool added 1.0
+        return rec
+
+
+class PacedRamps(unittest.TestCase):
+    def run_paced(self, cap_s=30.0, ramp_s=1.5, quota=5, start=46.4):
+        b = ThermalFake(temp=start)
+        waits = []
+
+        def sleep(s):
+            waits.append(s)
+            time.sleep(0.001)
+            b.temp = max(44.0, b.temp - 0.3)
+        rr = e2.Ramps(b, ThermalPool(b), HOT, FakeClock(),
+                      plan(ramps=1, ramp_s=ramp_s, pace_limit_c=56.0, pace_quota=quota,
+                           pace_cap_s=cap_s, pace_poll_s=0.0, idle_c=45.0),
+                      quick=b.quick, sleep=sleep, log=lambda s: None).run()
+        return rr, waits
+
+    def test_every_paced_bin_gets_its_quota_then_back_to_back(self):
+        rr, waits = self.run_paced()
+        self.assertIsNone(rr.abort_reason)
+        pc = rr.ramp_info[0]["pacing"]
+        self.assertEqual(pc["end_reason"], "filled")
+        self.assertEqual(pc["bins"], {"46": 5, "48": 5, "50": 5, "52": 5, "54": 5})
+        self.assertTrue(waits)                            # it had to wait for cooling
+        paced = [j for j in rr.jobs if j["paced"]]
+        self.assertEqual(len(paced), pc["paced_jobs"])
+        self.assertTrue(all(j["temp_before_c"] < 56.0 for j in paced))
+        later = rr.jobs[len(paced):]
+        self.assertTrue(later and not any(j["paced"] for j in later))
+        self.assertTrue(all(j["wait_ms"] == 0.0 for j in later))
+        self.assertTrue(any(j["wait_ms"] > 0 for j in paced))
+        bins = {}
+        for j in paced:                                   # G2 bins hold the quota too
+            bins.setdefault(int(j["temp_before_c"] // 2 * 2), []).append(j)
+        self.assertTrue(all(len(bins[k]) >= 5 for k in (46, 48, 50, 52, 54)))
+
+    def test_cap_ends_pacing(self):
+        rr, _ = self.run_paced(cap_s=0.05, quota=10_000)
+        pc = rr.ramp_info[0]["pacing"]
+        self.assertEqual(pc["end_reason"], "cap")
+        self.assertIsNone(rr.abort_reason)
+        self.assertTrue(any(not j["paced"] for j in rr.jobs))
+
+    def test_ramp_ending_while_pacing_is_recorded(self):
+        rr, _ = self.run_paced(ramp_s=0.05, quota=10_000)
+        self.assertEqual(rr.ramp_info[0]["pacing"]["end_reason"], "ramp ended")
+
+    def test_no_pacing_without_a_limit(self):
+        r, _ = ramps(ramps=1)
+        self.assertEqual(r.ramp_info[0]["pacing"]["end_reason"], "off")
+        self.assertFalse(any(j["paced"] for j in r.jobs))
+
+    def test_lost_watchdog_while_waiting(self):
+        b = ThermalFake(temp=47.9)
+        n = {"k": 0}
+
+        def check():
+            n["k"] += 1
+            if n["k"] > 3:
+                raise mg.MonitorLost("watchdog lost: monitor.log missing")
+        rr = e2.Ramps(b, ThermalPool(b), HOT, FakeClock(),
+                      plan(ramps=1, ramp_s=5.0, pace_limit_c=56.0, pace_quota=50,
+                           pace_poll_s=0.0, idle_c=45.0),
+                      check=check, quick=b.quick, sleep=lambda s: None, log=lambda s: None).run()
+        self.assertIn("watchdog lost", rr.interrupted)
+
+
 class Descriptive(unittest.TestCase):
     def test_clock_summary(self):
         s = [{"t_start": 0.0, "t_end": 0.001, "arm_clock_mhz": 1800.0},
@@ -255,6 +369,16 @@ class Descriptive(unittest.TestCase):
         s.append({"t_start": 100.0, "t_end": 100.01, "arm_clock_mhz": 1000.0})  # no temp near
         k = e2.support_knee(s, tele)
         self.assertEqual((k["knee_c"], k["f_min"]), (81.0, 1600.0))
+
+    def test_pacing_latency(self):
+        jobs = ([{"paced": True, "wait_ms": 0.0, "latency_ms": 196.0, "temp_before_c": 50.0}] * 3
+                + [{"paced": True, "wait_ms": 40.0, "latency_ms": 197.0, "temp_before_c": 52.0}] * 2
+                + [{"paced": False, "wait_ms": 0.0, "latency_ms": 196.5, "temp_before_c": 75.0}] * 4
+                + [{"paced": False, "wait_ms": 0.0, "latency_ms": 212.0, "temp_before_c": 83.0}] * 9)
+        pl = e2.pacing_latency(jobs, 80.8)
+        self.assertEqual(pl["paced"], {"n": 5, "latency_median_ms": 196.0})
+        self.assertEqual(pl["after_wait"], {"n": 2, "latency_median_ms": 197.0})
+        self.assertEqual(pl["back_to_back_below_knee"], {"n": 4, "latency_median_ms": 196.5})
 
     def test_outcome_follows_classify_g2(self):
         import test_analyze as ta
@@ -363,8 +487,9 @@ class Refusals(unittest.TestCase):
 
 
 class MockEndToEnd(unittest.TestCase):
+    # the mock die starts at 25 C: 23 paced bins below 70 C, so a smaller A5 quota
     ARGS = ["--backend", "mock", "--ramps", "1", "--ramp-minutes", "0.25", "--mock-tau", "3",
-            "--mock-job-ms", "5", "--idle-window-s", "0.5"]
+            "--mock-job-ms", "5", "--idle-window-s", "0.5", "--pace-quota", "20"]
 
     def run_mock(self, *extra):
         out = os.path.join(tempfile.mkdtemp(), "m")
@@ -377,11 +502,15 @@ class MockEndToEnd(unittest.TestCase):
     def test_rising_latency_passes_g2(self):
         rc, text, meta, out = self.run_mock()
         self.assertEqual(rc, 0)
-        self.assertEqual((meta["amendment"], meta["exp2_outcome"]), ("A4", "PASS"))
+        self.assertEqual((meta["amendment"], meta["exp2_outcome"]), ("A4", "PASS"), meta["g2"])
+        self.assertEqual(meta["procedure"], "A4+A5 paced warm-up")
+        pc = meta["ramps"][0]["pacing"]
+        self.assertEqual((pc["end_reason"], pc["limit_c"], pc["quota"]), ("filled", 70.0, 20))
+        self.assertTrue(all(n >= 20 for n in pc["bins"].values()))
         self.assertEqual(an.classify_g2(meta)[0], "PASS")           # the analysis agrees
         self.assertIn("MOCK, NOT A RESULT", text)
         self.assertEqual(meta["clock"]["readable"], meta["clock"]["reads"])
-        self.assertAlmostEqual(meta["knee_c"], 80.0, delta=1.5)
+        self.assertAlmostEqual(meta["knee_c"], 80.0, delta=3.0)    # 1 Hz reads, fast mock heating
         self.assertTrue(os.path.exists(os.path.join(out, "exp2.clock.jsonl")))
 
     def test_flat_latency_fails_g2(self):

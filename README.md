@@ -415,6 +415,19 @@ Experiment 2 measures s(T) under its own four-core load.
   `diag-stalls-20261018-03` measured about +0.35 ms on read-overlapped jobs; see `AMENDMENT_A4_exp2.md`.)
 Details, checks and evidence: `AMENDMENT_A4_exp2.md`.
 
+### Amendment A5 (2026-10-18, after Experiment 2 run -01 and before its rerun)
+Experiment 2 paces the heating below knee − 10 °C. Run `exp2-a4-20261018-01` was INCONCLUSIVE because four
+cores heat the die from about 46 °C to 70 °C in about 12 s. That left fewer than 20 jobs in each 2 °C bin
+below knee − 10 °C, so the A4 coverage rule failed in ramp 1.
+
+Each 12-minute ramp now starts with a paced warm-up. Below knee − 10 °C, the next job is dispatched only while
+the temperature is under the top of the lowest 2 °C bin that has fewer than 30 jobs. Pacing ends when those
+bins are full, or after 300 s. The jobs then run back to back.
+
+The job, the telemetry, the watchdog and the whole A4 analysis are unchanged. A5 was approved by Claude under
+the user's delegation while the user was away; the user had been shown and had not rejected this option.
+Details: `AMENDMENT_A5_exp2.md`.
+
 ---
 
 ## Expected confounders
