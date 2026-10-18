@@ -435,6 +435,13 @@ Each Experiment 2 ramp now ends 240 s after its paced warm-up. On run -02's timi
 kept bins at or above the knee per ramp and no reading at or above 85.0 °C. The watchdog stop, the job, the
 warm-up and the A4 analysis are unchanged. Approved by the user. Details: `AMENDMENT_A6_exp2.md`.
 
+### Amendment A7 (2026-10-18, before any Experiment 3 data)
+Experiment 3 runs under four-core load: P4c's HOT and COOL jobs, `k = 600` (300 + 300, about 120 s), in four
+orderings × 10 interleaved repetitions. Each sequence starts after a cooldown to idle + 3 °C and a HOT pre-heat
+to 77 °C, just below the 80.8 °C knee. Telemetry is P4c's scheme with no live clock reads, under a fork-free
+85 °C watchdog, in one supervised session of about 5.5 h. G3–G6 count only if every ordering has ≥ 8 valid
+sequences. G5's six pairwise P99 tests are Holm-corrected. Details: `AMENDMENT_A7_exp3.md`.
+
 ---
 
 ## Expected confounders

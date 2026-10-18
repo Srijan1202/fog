@@ -203,6 +203,8 @@ Attacks **2, 7, 8, 9** are the real threats. All four are settled by this pilot.
 
 **Amendment A6 (2026-10-18, after Experiment 2 run -02 and before run -03):** The A5 rerun was safety-stopped by single 85.2 °C readings 5–7 min into back-to-back load. Each Experiment 2 ramp now ends 240 s after its paced warm-up; the 85.0 °C stop and the A4 analysis are unchanged. Approved by the user. Details are in README.md, Amendment A6.
 
+**Amendment A7 (2026-10-18, before any Experiment 3 data):** Day 2 (Experiment 3) runs P4c's HOT/COOL jobs at four cores: k = 600 (half HOT), four orderings × 10 interleaved repetitions, each sequence after a cooldown to idle + 3 °C and a HOT pre-heat to 77 °C (just below the knee), in one supervised session. Only the near-knee start band is run. G3–G6 need ≥ 8 valid sequences per ordering, else INCONCLUSIVE; G5's pairwise P99 tests are Holm-corrected. Approved by the user. Details are in README.md, Amendment A7.
+
 **On thresholds:** deliberately no "≥20% improvement" bar. Report effect sizes with CIs and let magnitude speak. A well-characterized 8% tail improvement with a clean mechanism is a better paper than a hand-waved 30%.
 
 ---
