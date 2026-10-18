@@ -32,6 +32,11 @@ it is. When those bins are full (or 300 s after the ramp starts) the jobs run
 back to back for the rest of the 12 min. The job and the analysis are unchanged.
 --no-pace gives the A4 procedure.
 
+A6 (AMENDMENT_A6_exp2.md): the die reaches 85.2 C single readings 5-7 min into
+back-to-back load, and run exp2-a4-20261018-02 was safety-stopped at one. Each
+ramp now ends 240 s after its paced warm-up ends (--post-pace-s; --full-ramp
+gives A5). The 85.0 C watchdog stop is unchanged.
+
 On real hardware it refuses, before creating any file or starting any load,
 unless Experiment 1 passes G1 (--exp1-meta), the P4c validation is ACCEPTED
 (--workload-validation) and the mailbox clock reads. --require-monitor is
@@ -109,6 +114,9 @@ class Plan:
     pace_quota: int = 30
     pace_cap_s: float = 300.0
     pace_poll_s: float = 0.05
+    # Amendment A6: the ramp ends this long after the paced warm-up ends (never after
+    # ramp_s). None = the ramp runs its full ramp_s (A5).
+    post_pace_s: float | None = None
 
 
 class Pacer:
@@ -326,9 +334,13 @@ class Ramps:
                         pacing = False
                         pace.update(end_s=round(now - t_ramp, 1),
                                     end_reason="filled" if sp is None else "cap")
+                        if p.post_pace_s is not None:     # A6: a fixed back-to-back phase
+                            end = min(end, now + p.post_pace_s)
+                        pace["ramp_end_s"] = round(end - t_ramp, 1)
                         self.log(f"[exp2] ramp {r}: paced warm-up ended at {now - t_ramp:.0f} s "
                                  f"({pace['end_reason']}): {pace['paced_jobs']} paced jobs, "
-                                 f"{pace['wait_s']:.0f} s of waits; back to back from here")
+                                 f"{pace['wait_s']:.0f} s of waits; back to back until "
+                                 f"{end - t_ramp:.0f} s")
                     elif tb >= sp:            # A5: no load until below the setpoint
                         if wait_from is None:
                             wait_from = now
@@ -593,6 +605,11 @@ def build_args(argv=None):
                     help="A5: pacing ends at most this long after the ramp starts")
     ap.add_argument("--no-pace", action="store_true",
                     help="A4 procedure without the A5 paced warm-up (jobs back to back throughout)")
+    ap.add_argument("--post-pace-s", type=float, default=240.0,
+                    help="A6: each ramp ends this long after its paced warm-up ends (at most "
+                         "--ramp-minutes after it starts)")
+    ap.add_argument("--full-ramp", action="store_true",
+                    help="A5 procedure: no A6 cut, every ramp runs --ramp-minutes")
     ap.add_argument("--require-monitor", type=float, default=None, metavar="SECONDS",
                     help="MANDATORY on real hardware (tools/launch_exp2.sh passes it): fresh "
                          "--outdir, no load until a verified tools/exp2_monitor.sh")
@@ -697,7 +714,8 @@ def _run(args, b, is_mock, ctx, root, guard, check):
                 max_temp=args.max_temp, poll_s=0.5 if is_mock else 2.0,
                 progress_s=10.0 if is_mock else 60.0,
                 pace_limit_c=None if args.no_pace else ctx["g1"]["knee_c"] - analyze.G2_RULE["below_knee_c"],
-                pace_quota=args.pace_quota, pace_cap_s=args.pace_cap_s)
+                pace_quota=args.pace_quota, pace_cap_s=args.pace_cap_s,
+                post_pace_s=None if args.full_ramp or args.no_pace else args.post_pace_s)
     pool = power = None
     try:
         if is_mock:
@@ -730,7 +748,9 @@ def _run(args, b, is_mock, ctx, root, guard, check):
     knee = support_knee(ramps.clock_samples, ramps.tele)
     meta = {
         "experiment": "exp2_curve", "amendment": AMENDMENT,
-        "procedure": "A4" if plan.pace_limit_c is None else "A4+A5 paced warm-up",
+        "procedure": ("A4" if plan.pace_limit_c is None else "A4+A5 paced warm-up"
+                      + (f"+A6 {plan.post_pace_s:g} s back to back" if plan.post_pace_s is not None
+                         else "")),
         "backend": b.name, "mock": is_mock,
         "workload": _workload_record(ctx["workload"]),
         "g1": ctx["g1"], "g1_knee_c": ctx["g1"]["knee_c"],
@@ -768,7 +788,8 @@ def _run(args, b, is_mock, ctx, root, guard, check):
         pc = ri.get("pacing")
         if pc and pc.get("end_reason") != "off":
             print(f"    paced warm-up (A5): {pc['paced_jobs']} jobs, {pc['wait_s']:.0f} s of waits, "
-                  f"ended at {pc['end_s']} s ({pc['end_reason']}); jobs per paced bin {pc.get('bins')}")
+                  f"ended at {pc['end_s']} s ({pc['end_reason']}), ramp to {pc.get('ramp_end_s')} s; "
+                  f"jobs per paced bin {pc.get('bins')}")
     pl = meta["pacing_latency"]
     if pl["paced"]["n"]:
         print(f"paced vs back-to-back jobs (descriptive): median {pl['paced']['latency_median_ms']:.1f} ms "

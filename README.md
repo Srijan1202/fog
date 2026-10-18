@@ -428,6 +428,13 @@ The job, the telemetry, the watchdog and the whole A4 analysis are unchanged. A5
 the user's delegation while the user was away; the user had been shown and had not rejected this option.
 Details: `AMENDMENT_A5_exp2.md`.
 
+### Amendment A6 (2026-10-18, after Experiment 2 run -02 and before run -03)
+Run `exp2-a4-20261018-02` (A5) filled every low-temperature bin, but the watchdog's 85.0 °C stop ended it. On
+the plateau the die sits at about 83.3 °C, and single readings reach 85.2 °C 5–7 min into back-to-back load.
+Each Experiment 2 ramp now ends 240 s after its paced warm-up. On run -02's timing that leaves at least three
+kept bins at or above the knee per ramp and no reading at or above 85.0 °C. The watchdog stop, the job, the
+warm-up and the A4 analysis are unchanged. Approved by the user. Details: `AMENDMENT_A6_exp2.md`.
+
 ---
 
 ## Expected confounders

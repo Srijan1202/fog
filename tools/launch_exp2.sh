@@ -5,7 +5,8 @@
 # exp2 refuses before writing anything unless EXP2_ARGS name an Experiment 1 that
 # passes G1 and an ACCEPTED P4c validation, and the firmware mailbox clock reads.
 # Both files are pinned below with the code. Since Amendment A5, exp2_curve.py paces each
-# ramp's warm-up below knee - 10 C by default (AMENDMENT_A5_exp2.md, also pinned).
+# ramp's warm-up below knee - 10 C by default (AMENDMENT_A5_exp2.md) and, since A6, ends each
+# ramp 240 s after it (AMENDMENT_A6_exp2.md); both pinned.
 # Delivered over SSH through stdin (bash -s); this file is never written to the Pi.
 #   Phase 1  idle observation, revised criterion (15-30 min, read-only)
 #   Phase 2  guards (read-only)                    -> failure: exit 3, nothing launched
@@ -28,8 +29,8 @@
 # monitoring not established; 5 token written but not acknowledged.
 {
 # BEGIN SITE CONFIG
-RUN=exp2-a4-20261018-02
-B0=0161e1c0-4cb1-45f2-9386-244567e75458
+RUN=exp2-a4-20261018-03
+B0=cb8c1378-4b03-4f65-9183-6f3caa6dc943
 HOST_EXPECTED=pi
 PROJECT="$HOME/tdas-pilot"
 OUT=results
@@ -51,7 +52,7 @@ LAUNCH_PATH=/usr/sbin:/usr/bin:/sbin:/bin
 LAUNCH_LANG=en_GB.UTF-8
 ARCHIVES=""
 EXPECTED_HASHES='
-296fbf6aedf47790540c07ed05e036b8510feb168c0894fa885e9992ecae15cc exp2_curve.py
+85f9725749cbcbd62d41f539fd7c048b3424575586eb54fcd390335888599170 exp2_curve.py
 9462352871722919bb165939e3b862ce2a8b14725e4b03dc5545ca63c38c15df analyze.py
 d9df2f74772c9bd0ac0cc8204f59fb97088df3744dbc16048e6eb4e7ae52c9bc sensors.py
 31665b5a42dce04b1d97dc66be2df7fc44cba97a7c72f285cad53beb2f59a285 runner.py
@@ -64,6 +65,7 @@ af3eafbf86f69d3613da2fccd057aaca0b8709330d0d97b3186788461b45af98 exp3_ordering.p
 c586e9eb18d7193990413650e59c870f1738afbeca67a66800ae7c004114aa90 tools/exp2_monitor.sh
 999a18c0b5f7d348228b6b47930076469390dd723b0ea061d6cfbcff5c050336 AMENDMENT_A4_exp2.md
 8ca9a470bc3cdff924aee1656c9598cf57c22221069a201fbb1191a443bffd1b AMENDMENT_A5_exp2.md
+1b7e4286576a5417c8f9548845536fee91ee4245f902bde5cd523c8624c0d2cc AMENDMENT_A6_exp2.md
 c65d588262a583890234670ff6594d4b886433556780af480498a3d4b9aca2d4 results/exp1-4core-a3-20261016-01/exp1.meta.json
 d50f152beb6bad7317889eaebf1c25552d9b04cf36ffca89eecc70c90679ed96 results/workload_validation/wv-p4c-20261017-01/report.json
 '

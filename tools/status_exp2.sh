@@ -17,8 +17,8 @@
 # 6 INTERVENTION REQUIRED / leftovers / identity, boot or window problem.
 {
 # BEGIN SITE CONFIG
-RUN=exp2-a4-20261018-02
-B0=0161e1c0-4cb1-45f2-9386-244567e75458
+RUN=exp2-a4-20261018-03
+B0=cb8c1378-4b03-4f65-9183-6f3caa6dc943
 PROJECT="$HOME/tdas-pilot"
 OUT=results
 CAP=5400

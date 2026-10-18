@@ -201,6 +201,8 @@ Attacks **2, 7, 8, 9** are the real threats. All four are settled by this pilot.
 
 **Amendment A5 (2026-10-18, after Experiment 2 run -01 and before its rerun):** Four cores heat the die through the range below knee − 10 °C in about 12 s, too fast to fill the 2 °C bins that A4's coverage rule needs. Each Experiment 2 ramp therefore starts with a paced warm-up: below knee − 10 °C, a job is dispatched only while the temperature is under the top of the lowest bin with fewer than 30 jobs. The A4 analysis is unchanged. Approved by Claude under the user's delegation. Details are in README.md, Amendment A5.
 
+**Amendment A6 (2026-10-18, after Experiment 2 run -02 and before run -03):** The A5 rerun was safety-stopped by single 85.2 °C readings 5–7 min into back-to-back load. Each Experiment 2 ramp now ends 240 s after its paced warm-up; the 85.0 °C stop and the A4 analysis are unchanged. Approved by the user. Details are in README.md, Amendment A6.
+
 **On thresholds:** deliberately no "≥20% improvement" bar. Report effect sizes with CIs and let magnitude speak. A well-characterized 8% tail improvement with a clean mechanism is a better paper than a hand-waved 30%.
 
 ---

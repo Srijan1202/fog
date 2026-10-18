@@ -303,6 +303,30 @@ class PacedRamps(unittest.TestCase):
             bins.setdefault(int(j["temp_before_c"] // 2 * 2), []).append(j)
         self.assertTrue(all(len(bins[k]) >= 5 for k in (46, 48, 50, 52, 54)))
 
+    def test_a6_ramp_ends_a_fixed_time_after_pacing(self):
+        b = ThermalFake(temp=46.4)
+
+        def sleep(s):
+            time.sleep(0.001)
+            b.temp = max(44.0, b.temp - 0.3)
+        rr = e2.Ramps(b, ThermalPool(b), HOT, FakeClock(),
+                      plan(ramps=1, ramp_s=30.0, pace_limit_c=50.0, pace_quota=3,
+                           pace_poll_s=0.0, idle_c=45.0, post_pace_s=0.3),
+                      quick=b.quick, sleep=sleep, log=lambda s: None).run()
+        pc = rr.ramp_info[0]["pacing"]
+        self.assertEqual(pc["end_reason"], "filled")
+        self.assertAlmostEqual(pc["ramp_end_s"], pc["end_s"] + 0.3, delta=0.15)
+        self.assertLess(rr.ramp_info[0]["wall_s"], 5.0)               # not the 30 s ramp
+        self.assertIsNone(rr.abort_reason)
+        self.assertEqual(rr.ramps_completed, 1)
+        after = [j for j in rr.jobs if not j["paced"]]
+        self.assertTrue(after)
+
+    def test_a6_never_extends_the_ramp(self):
+        rr, _ = self.run_paced(ramp_s=1.5)          # post_pace_s None: full ramp (A5)
+        pc = rr.ramp_info[0]["pacing"]
+        self.assertAlmostEqual(pc["ramp_end_s"], 1.5, delta=0.05)
+
     def test_cap_ends_pacing(self):
         rr, _ = self.run_paced(cap_s=0.05, quota=10_000)
         pc = rr.ramp_info[0]["pacing"]
@@ -503,7 +527,7 @@ class MockEndToEnd(unittest.TestCase):
         rc, text, meta, out = self.run_mock()
         self.assertEqual(rc, 0)
         self.assertEqual((meta["amendment"], meta["exp2_outcome"]), ("A4", "PASS"), meta["g2"])
-        self.assertEqual(meta["procedure"], "A4+A5 paced warm-up")
+        self.assertEqual(meta["procedure"], "A4+A5 paced warm-up+A6 240 s back to back")
         pc = meta["ramps"][0]["pacing"]
         self.assertEqual((pc["end_reason"], pc["limit_c"], pc["quota"]), ("filled", 70.0, 20))
         self.assertTrue(all(n >= 20 for n in pc["bins"].values()))
