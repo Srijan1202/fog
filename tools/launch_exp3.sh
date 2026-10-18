@@ -28,7 +28,7 @@
 {
 # BEGIN SITE CONFIG
 RUN=exp3-a7-20261018-01
-B0=UNSET-boot-id-set-after-reboot
+B0=5766d426-3421-4de1-a920-efc62cd082df
 HOST_EXPECTED=pi
 PROJECT="$HOME/tdas-pilot"
 OUT=results
