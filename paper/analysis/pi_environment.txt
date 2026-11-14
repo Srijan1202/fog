@@ -1,0 +1,13 @@
+# Read-only environment query of the experiment device, 2026-10-18 12:39:51 UTC; same boot as the Exp 3 session: 5766d426-3421-4de1-a920-efc62cd082df
+model: Raspberry Pi 4 Model B Rev 1.4
+kernel: 6.18.50+rpt-rpi-v8 aarch64
+os: Debian GNU/Linux 13 (trixie)
+cpu:  x 4
+memory: 1.8 GiB
+firmware: Sep 14 2026 14:49:30  Copyright (c) 2012 Broadcom version a86983925695a7e63166327d7c002d64040ed31d (clean) (release) (start) 
+config: arm_freq=1800 temp_limit=0 temp_soft_limit=0 over_voltage=0
+cpufreq: governor performance, min 600000 kHz, max 1800000 kHz
+python: Python 3.13.5; numpy: 2.2.4
+blas: name: blas
+thermal sensor: cpu-thermal
+fans/cooling devices: thermal_zone0 

@@ -1,0 +1,66 @@
+== archives (sha256)
+  exp1       a84997e7308ff09210369f334da394af5c7529de1194beba9c5f6d0c74ef9733
+  exp2_01    c7d8fec3b7726f5704ce54ca1c0320a68f7755084424aa2943059013f2e71ef7
+  exp2_02    4329aad2885e7a57e41bb6da60037044b3f76423c97236ea2b97cae8396a286f
+  exp2_03    5bb8d13a68ce1aaeeb2a9fbb973b13c5037dc1fb07497b8d3b6562d51fb54513
+  exp3       4e4ae7f6dac925ce4c19441f37b5508723860a16a5db23d85ba67542ee305b00
+  p4c_report d50f152beb6bad7317889eaebf1c25552d9b04cf36ffca89eecc70c90679ed96
+
+================ PART A: reproduction of the recorded statistics ================
+
+G1: knee 80.828 C (record 80.828), f 1800.5 -> 1629.4 MHz, depth 9.50 %, 477 throttled of 6894 samples, clock missing 0; classify_g1 = PASS; matches record: True
+
+G2: 3027 jobs, 36 kept bins; slope +0.2080 ms/C, 95% CI [+0.0696, +0.3433] (record +0.2080 [+0.0696, +0.3433]); bins identical to record: True; classify_g2 = PASS
+
+G3: P4c ACCEPTED; gap g_hat -0.0505 % CI [-0.0801, -0.0006] %, class TARGET MET, pairs 40; HOT median 196.32262799859745 ms, COOL median 196.22353799786652 ms
+
+Exp3: 40 sequences (40 valid, 0 reruns), n_valid {'hot_first': 10, 'cool_first': 10, 'alternating': 10, 'random': 10}; 24000 jobs, 23843 telemetry samples; e3_invalid = None; per-sequence metrics recomputed from raw jobs/telemetry: all match the record; ordering structure ok: True; units ok: True
+
+G4: hot_first - alternating: +13.30 s, 95% CI [+6.00, +23.80] -> PASS=True; identical to analyze.boot_diff: True; worst-median orderings tied at 0.0: alternating, random
+
+G5 (P99) pairs: diff [95% CI] p (Holm) cliffs_d
+  alternating  - cool_first    +0.79 [ -7.66,  +1.97] p=0.3064 holm=False d=+0.30 official-match=True
+  alternating  - hot_first     +0.88 [ -1.29,  +1.36] p=0.0678 holm=False d=+0.44 official-match=True
+  alternating  - random        +0.62 [ +0.01,  +1.08] p=0.0456 holm=False d=+0.56 official-match=True
+  cool_first   - hot_first     +0.09 [ -1.97,  +8.45] p=0.9788 holm=False d=+0.00 official-match=True
+  cool_first   - random        -0.16 [ -1.39,  +8.18] p=0.3892 holm=False d=-0.12 official-match=True
+  hot_first    - random        -0.26 [ -0.75,  +1.90] p=0.3402 holm=False d=-0.14 official-match=True
+G5 pass: False; G5b pass: False
+
+analyze.main() on exp1 A3 + exp2 run -03 + exp3: verdict LIKELY_KILL, gates {'G1_knee': True, 'G2_sT': True, 'G3_match': True, 'G4_mediator': True, 'G5_outcome': False, 'G5b_secondary': False, 'G6_mediation': None}
+
+================ PART B: EXPLORATORY (post hoc; cannot change the verdict) ================
+B1 P99 with n=600 (linear): position 593.01 -> 7th largest, interpolated 1% toward the 6th largest
+B2 jobs_over_200ms: hot_first median 15.5 [11, 91]; cool_first median 14.5 [9, 110]; alternating median 18.0 [11, 27]; random median 15.5 [8, 21]
+B2 jobs_over_205ms: hot_first median 2.5 [2, 13]; cool_first median 2.5 [2, 43]; alternating median 2.0 [1, 4]; random median 2.5 [1, 3]
+B2 jobs_over_210ms: hot_first median 1.0 [1, 2]; cool_first median 2.0 [1, 8]; alternating median 2.0 [0, 2]; random median 1.0 [0, 3]
+B2 jobs_started_at_or_above_knee: hot_first median 60.0 [9, 181]; cool_first median 3.0 [0, 170]; alternating median 0.0 [0, 0]; random median 0.0 [0, 0]
+B3 HOT job latency: below_knee n=10742 median 196.87 ms p90 198.98; at_or_above_knee n=1258 median 198.29 ms p90 204.99
+B4 within-sequence P99 95% bootstrap CI width: median 3.27 ms [0.90, 18.29]
+B5 per-sequence P99 SD (ms): hot_first 1.93 (robust 0.47), cool_first 4.67 (robust 1.76), alternating 0.53 (robust 0.59), random 0.63 (robust 0.43)
+B5 approx. minimum detectable P99 difference (80% power, alpha 0.05/6): alternating-cool_first 5.17 (robust 2.04), alternating-hot_first 2.20 (robust 0.83), alternating-random 0.90 (robust 0.80), cool_first-hot_first 5.56 (robust 2.00), cool_first-random 5.18 (robust 1.99), hot_first-random 2.23 (robust 0.70)
+B6 paired-by-rep P99 hot_first - alternating: median -0.79 ms, 3/10 positive
+B7 Spearman vs run order: p99_ms -0.31, mean_ms -0.35, time_above_knee_s +0.13, peak_temp_c -0.05, preheat_s +0.48
+B8 across 40 sequences: Pearson r(time above knee, P99) = +0.792, Spearman +0.118 (descriptive; G6 was not testable)
+B9 sequences with the most time above the knee (run_index, rep, mode, s above knee, P99, preheat s, cooldown s):
+  # 4 rep 1 hot_first    36.6 s  P99 205.47  preheat  34.3  cooldown  214.1
+  # 2 rep 0 cool_first   34.8 s  P99 210.42  preheat  32.1  cooldown  172.0
+  # 1 rep 0 hot_first    33.4 s  P99 205.60  preheat  32.1  cooldown  132.0
+  # 8 rep 2 cool_first   33.4 s  P99 210.81  preheat  32.1  cooldown  160.0
+  # 5 rep 1 cool_first   32.0 s  P99 209.64  preheat  32.3  cooldown  186.1
+  #14 rep 3 hot_first    18.8 s  P99 200.21  preheat  48.7  cooldown   68.0
+  #31 rep 7 hot_first    14.2 s  P99 201.15  preheat  48.9  cooldown   62.0
+  #16 rep 4 hot_first    13.8 s  P99 201.64  preheat  52.0  cooldown   70.0
+B10 pooled-job P99 (6000 jobs per ordering, not preregistered): hot_first 204.05, cool_first 207.85, alternating 202.24, random 201.63
+B11 jobs > 215 ms per ordering (of 6000): {'hot_first': 11, 'cool_first': 15, 'alternating': 12, 'random': 12}; of these started below the knee: {'hot_first': 10, 'cool_first': 11, 'alternating': 12, 'random': 12}
+B12 per repetition: P99 ms (time above knee s) by ordering | median cooldown s, median preheat s
+  rep 0: hot_ 205.60 (33.4) | cool 210.42 (34.8) | alte 202.56 ( 0.0) | rand 201.54 ( 0.0) | cooldown  152.0, preheat 32.1
+  rep 1: hot_ 205.47 (36.6) | cool 209.64 (32.0) | alte 201.34 ( 0.0) | rand 200.07 ( 0.0) | cooldown  217.1, preheat 33.1
+  rep 2: hot_ 201.32 ( 1.4) | cool 210.81 (33.4) | alte 202.58 ( 0.0) | rand 200.70 ( 0.0) | cooldown  262.1, preheat 36.2
+  rep 3: hot_ 200.21 (18.8) | cool 201.35 ( 0.0) | alte 202.17 ( 0.0) | rand 201.89 ( 0.0) | cooldown   62.0, preheat 44.4
+  rep 4: hot_ 201.64 (13.8) | cool 200.11 ( 0.2) | alte 200.97 ( 0.0) | rand 202.00 ( 0.0) | cooldown   66.0, preheat 45.1
+  rep 5: hot_ 200.53 (10.0) | cool 201.45 ( 0.0) | alte 201.99 ( 0.0) | rand 201.63 ( 0.0) | cooldown   75.0, preheat 44.8
+  rep 6: hot_ 201.01 ( 5.6) | cool 200.08 ( 1.4) | alte 202.51 ( 0.0) | rand 201.31 ( 0.0) | cooldown   73.0, preheat 43.0
+  rep 7: hot_ 201.15 (14.2) | cool 200.42 ( 0.0) | alte 201.69 ( 0.0) | rand 202.17 ( 0.0) | cooldown   64.0, preheat 48.1
+  rep 8: hot_ 201.50 (12.8) | cool 200.22 ( 0.0) | alte 202.17 ( 0.0) | rand 201.45 ( 0.0) | cooldown   57.0, preheat 45.2
+  rep 9: hot_ 201.20 ( 6.0) | cool 201.34 ( 5.0) | alte 202.11 ( 0.0) | rand 201.48 ( 0.0) | cooldown   70.0, preheat 45.7

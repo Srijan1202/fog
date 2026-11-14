@@ -1,0 +1,9 @@
+ PREREG_workload_validation_ADDENDUM_rev3.md |  12 [32m+[m[31m-[m
+ README.md                                   | 109 [32m+++++++[m[31m---[m
+ provenance/WORKLOAD_VALIDATION_rev3.md      |  47 [32m+++[m[31m--[m
+ test_validate_workload.py                   | 118 [32m++++++++++[m[31m-[m
+ tools/idle_observation.sh                   | 154 [32m++++++++++++++[m
+ tools/launch_validation.sh                  |   2 [32m+[m[31m-[m
+ tools/pi_smoke_test.sh                      | 310 [32m++++++++++++++++++++++++++++[m
+ validate_workload.py                        |  81 [32m+++++[m[31m---[m
+ 8 files changed, 749 insertions(+), 84 deletions(-)

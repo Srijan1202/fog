@@ -1,0 +1,544 @@
+{
+  "experiment": "exp2_curve",
+  "amendment": "A4",
+  "procedure": "A4+A5 paced warm-up+A6 240 s back to back",
+  "backend": "raspberrypi",
+  "mock": false,
+  "workload": {
+    "accepted": true,
+    "mock": false,
+    "config": "4c",
+    "telemetry": "sysfs",
+    "frozen": {
+      "P": 4,
+      "n_b": 128,
+      "u_h": 13,
+      "u_c": 5,
+      "S_ms": 119.55465196660953,
+      "params_id": "P4c-F1",
+      "calibration": [
+        {
+          "round": 1,
+          "block_id": "P4c-C1-e1",
+          "S_in_ms": 120.29617596999742,
+          "S_out_ms": 119.82770296890521,
+          "clamped": false,
+          "pairs_used": [
+            5,
+            6,
+            7,
+            8,
+            9
+          ]
+        },
+        {
+          "round": 2,
+          "block_id": "P4c-C2-e1",
+          "S_in_ms": 119.82770296890521,
+          "S_out_ms": 119.55465196660953,
+          "clamped": false,
+          "pairs_used": [
+            5,
+            6,
+            7,
+            8,
+            9
+          ]
+        }
+      ],
+      "stale": false,
+      "frozen_at": "2026-10-17 21:25:16",
+      "gemms_per_unit": 4
+    },
+    "validation_run": "wv-p4c-20261017-01",
+    "report": "results/workload_validation/wv-p4c-20261017-01/report.json",
+    "cold_latency_match": {
+      "hot_median_ms": 196.32262799859745,
+      "cool_median_ms": 196.22353799786652,
+      "relative_gap": -0.000504730411064247,
+      "gap_ci": [
+        -0.0008013874566223877,
+        -5.5116820218277545e-06
+      ],
+      "gap_class": "TARGET MET",
+      "matched": true,
+      "source": "workload validation wv-p4c-20261017-01 (P4c)"
+    },
+    "hot": {
+      "name": "HOT",
+      "P": 4,
+      "n_b": 128,
+      "units_per_shard": 13,
+      "sleep_per_shard_ms": 0.0,
+      "gemms_per_unit": 4
+    },
+    "report_sha256": "d50f152beb6bad7317889eaebf1c25552d9b04cf36ffca89eecc70c90679ed96"
+  },
+  "g1": {
+    "state": "PASS",
+    "knee_c": 80.828,
+    "depth": 0.09501494767088847,
+    "reason": "knee measured in a valid exp1",
+    "exp1_meta": "results/exp1-4core-a3-20261016-01/exp1.meta.json",
+    "exp1_meta_sha256": "c65d588262a583890234670ff6594d4b886433556780af480498a3d4b9aca2d4"
+  },
+  "g1_knee_c": 80.828,
+  "idle_temp_c": 44.79,
+  "idle_window": {
+    "baseline_c": 44.79,
+    "min_c": 43.329,
+    "max_c": 45.764,
+    "n": 61,
+    "window_s": 30.0,
+    "stable": false
+  },
+  "plan": {
+    "ramps": 2,
+    "ramp_s": 720.0,
+    "idle_c": 44.79,
+    "margin_c": 3.0,
+    "cooldown_cap_s": 1200.0,
+    "hz": 5.0,
+    "clock_hz": 1.0,
+    "clock_jitter": 0.5,
+    "seed": 0,
+    "max_temp": null,
+    "poll_s": 2.0,
+    "progress_s": 60.0,
+    "pace_limit_c": 70.828,
+    "pace_quota": 30,
+    "pace_cap_s": 300.0,
+    "pace_poll_s": 0.05,
+    "post_pace_s": 240.0
+  },
+  "ramps_planned": 2,
+  "ramps_completed": 2,
+  "ramps": [
+    {
+      "ramp": 0,
+      "start_temp_c": 45.764,
+      "cooldown_s": 0.0,
+      "flags_before": "0x0",
+      "pacing": {
+        "limit_c": 70.828,
+        "quota": 30,
+        "cap_s": 300.0,
+        "paced_jobs": 362,
+        "wait_s": 102.982,
+        "end_s": 175.1,
+        "end_reason": "filled",
+        "ramp_end_s": 415.1,
+        "bins": {
+          "46": 30,
+          "48": 30,
+          "50": 30,
+          "52": 30,
+          "54": 30,
+          "56": 30,
+          "58": 30,
+          "60": 31,
+          "62": 31,
+          "64": 30,
+          "66": 30,
+          "68": 30
+        }
+      },
+      "jobs": 1516,
+      "wall_s": 415.2,
+      "peak_temp_c": 84.724,
+      "clock_reads": 404,
+      "flags_after": "0x80008"
+    },
+    {
+      "ramp": 1,
+      "start_temp_c": 47.712,
+      "cooldown_s": 330.1,
+      "flags_before": "0x80000",
+      "pacing": {
+        "limit_c": 70.828,
+        "quota": 30,
+        "cap_s": 300.0,
+        "paced_jobs": 361,
+        "wait_s": 215.778,
+        "end_s": 287.7,
+        "end_reason": "filled",
+        "ramp_end_s": 527.7,
+        "bins": {
+          "46": 30,
+          "48": 30,
+          "50": 30,
+          "52": 30,
+          "54": 30,
+          "56": 30,
+          "58": 30,
+          "60": 30,
+          "62": 30,
+          "64": 30,
+          "66": 31,
+          "68": 30
+        }
+      },
+      "jobs": 1511,
+      "wall_s": 527.9,
+      "peak_temp_c": 84.724,
+      "clock_reads": 533,
+      "flags_after": "0x80008"
+    }
+  ],
+  "n_jobs": 3027,
+  "jobs_complete": true,
+  "undervoltage": false,
+  "abort_reason": null,
+  "interrupted": null,
+  "monitor": {
+    "validator_pid": 2727,
+    "validator_start": 145084,
+    "watchdog_pid": 2754,
+    "watchdog_start": 145140,
+    "stale_s": 30.0
+  },
+  "clock": {
+    "source": "firmware mailbox (/dev/vcio)",
+    "reads": 937,
+    "readable": 937,
+    "readable_fraction": 1.0,
+    "min_mhz": 1531.406208,
+    "max_mhz": 1800.457088,
+    "read_wall_ms_median": 1.108,
+    "read_wall_ms_max": 6.661,
+    "hz": 1.0,
+    "jitter": 0.5,
+    "seed": 0
+  },
+  "bins": [
+    {
+      "ramp": 0,
+      "bin_lo_c": 46.0,
+      "n": 30,
+      "temp_median_c": 47.712,
+      "latency_median_ms": 196.22759399999268
+    },
+    {
+      "ramp": 0,
+      "bin_lo_c": 48.0,
+      "n": 30,
+      "temp_median_c": 49.66,
+      "latency_median_ms": 196.3729174999571
+    },
+    {
+      "ramp": 0,
+      "bin_lo_c": 50.0,
+      "n": 30,
+      "temp_median_c": 51.608,
+      "latency_median_ms": 196.34977900000194
+    },
+    {
+      "ramp": 0,
+      "bin_lo_c": 52.0,
+      "n": 30,
+      "temp_median_c": 53.556,
+      "latency_median_ms": 196.35653849991286
+    },
+    {
+      "ramp": 0,
+      "bin_lo_c": 54.0,
+      "n": 30,
+      "temp_median_c": 55.991,
+      "latency_median_ms": 196.36967650001225
+    },
+    {
+      "ramp": 0,
+      "bin_lo_c": 56.0,
+      "n": 30,
+      "temp_median_c": 57.939,
+      "latency_median_ms": 196.34218650003277
+    },
+    {
+      "ramp": 0,
+      "bin_lo_c": 58.0,
+      "n": 30,
+      "temp_median_c": 59.887,
+      "latency_median_ms": 196.34694599994873
+    },
+    {
+      "ramp": 0,
+      "bin_lo_c": 60.0,
+      "n": 31,
+      "temp_median_c": 61.835,
+      "latency_median_ms": 196.3491310000336
+    },
+    {
+      "ramp": 0,
+      "bin_lo_c": 62.0,
+      "n": 31,
+      "temp_median_c": 63.783,
+      "latency_median_ms": 196.34340899983727
+    },
+    {
+      "ramp": 0,
+      "bin_lo_c": 64.0,
+      "n": 30,
+      "temp_median_c": 65.244,
+      "latency_median_ms": 196.40580600002977
+    },
+    {
+      "ramp": 0,
+      "bin_lo_c": 66.0,
+      "n": 30,
+      "temp_median_c": 67.192,
+      "latency_median_ms": 196.38425150014882
+    },
+    {
+      "ramp": 0,
+      "bin_lo_c": 68.0,
+      "n": 30,
+      "temp_median_c": 69.627,
+      "latency_median_ms": 196.39813099990988
+    },
+    {
+      "ramp": 0,
+      "bin_lo_c": 74.0,
+      "n": 27,
+      "temp_median_c": 74.984,
+      "latency_median_ms": 196.5197970000645
+    },
+    {
+      "ramp": 0,
+      "bin_lo_c": 76.0,
+      "n": 46,
+      "temp_median_c": 77.419,
+      "latency_median_ms": 196.4841860000206
+    },
+    {
+      "ramp": 0,
+      "bin_lo_c": 78.0,
+      "n": 77,
+      "temp_median_c": 79.367,
+      "latency_median_ms": 196.5485550001631
+    },
+    {
+      "ramp": 0,
+      "bin_lo_c": 80.0,
+      "n": 145,
+      "temp_median_c": 81.802,
+      "latency_median_ms": 198.0252160001328
+    },
+    {
+      "ramp": 0,
+      "bin_lo_c": 82.0,
+      "n": 797,
+      "temp_median_c": 83.263,
+      "latency_median_ms": 207.94028399996023
+    },
+    {
+      "ramp": 0,
+      "bin_lo_c": 84.0,
+      "n": 48,
+      "temp_median_c": 84.237,
+      "latency_median_ms": 212.1461914999827
+    },
+    {
+      "ramp": 1,
+      "bin_lo_c": 46.0,
+      "n": 30,
+      "temp_median_c": 47.712,
+      "latency_median_ms": 196.4187904998198
+    },
+    {
+      "ramp": 1,
+      "bin_lo_c": 48.0,
+      "n": 30,
+      "temp_median_c": 49.66,
+      "latency_median_ms": 196.41592750008385
+    },
+    {
+      "ramp": 1,
+      "bin_lo_c": 50.0,
+      "n": 30,
+      "temp_median_c": 51.608,
+      "latency_median_ms": 196.30594249997557
+    },
+    {
+      "ramp": 1,
+      "bin_lo_c": 52.0,
+      "n": 30,
+      "temp_median_c": 53.556,
+      "latency_median_ms": 196.35244799997054
+    },
+    {
+      "ramp": 1,
+      "bin_lo_c": 54.0,
+      "n": 30,
+      "temp_median_c": 55.991,
+      "latency_median_ms": 196.3817995001591
+    },
+    {
+      "ramp": 1,
+      "bin_lo_c": 56.0,
+      "n": 30,
+      "temp_median_c": 57.939,
+      "latency_median_ms": 196.3312694999786
+    },
+    {
+      "ramp": 1,
+      "bin_lo_c": 58.0,
+      "n": 30,
+      "temp_median_c": 59.887,
+      "latency_median_ms": 196.38744200028668
+    },
+    {
+      "ramp": 1,
+      "bin_lo_c": 60.0,
+      "n": 30,
+      "temp_median_c": 61.835,
+      "latency_median_ms": 196.33453949995783
+    },
+    {
+      "ramp": 1,
+      "bin_lo_c": 62.0,
+      "n": 30,
+      "temp_median_c": 63.783,
+      "latency_median_ms": 196.3386715001434
+    },
+    {
+      "ramp": 1,
+      "bin_lo_c": 64.0,
+      "n": 30,
+      "temp_median_c": 65.731,
+      "latency_median_ms": 196.32431799982442
+    },
+    {
+      "ramp": 1,
+      "bin_lo_c": 66.0,
+      "n": 31,
+      "temp_median_c": 67.679,
+      "latency_median_ms": 196.33097699988866
+    },
+    {
+      "ramp": 1,
+      "bin_lo_c": 68.0,
+      "n": 30,
+      "temp_median_c": 69.14,
+      "latency_median_ms": 196.320612999898
+    },
+    {
+      "ramp": 1,
+      "bin_lo_c": 74.0,
+      "n": 28,
+      "temp_median_c": 75.22749999999999,
+      "latency_median_ms": 196.45775549975042
+    },
+    {
+      "ramp": 1,
+      "bin_lo_c": 76.0,
+      "n": 39,
+      "temp_median_c": 77.419,
+      "latency_median_ms": 196.52952800015555
+    },
+    {
+      "ramp": 1,
+      "bin_lo_c": 78.0,
+      "n": 66,
+      "temp_median_c": 79.367,
+      "latency_median_ms": 196.44538700003977
+    },
+    {
+      "ramp": 1,
+      "bin_lo_c": 80.0,
+      "n": 122,
+      "temp_median_c": 81.315,
+      "latency_median_ms": 197.44365049996304
+    },
+    {
+      "ramp": 1,
+      "bin_lo_c": 82.0,
+      "n": 844,
+      "temp_median_c": 83.263,
+      "latency_median_ms": 208.48669100018924
+    },
+    {
+      "ramp": 1,
+      "bin_lo_c": 84.0,
+      "n": 37,
+      "temp_median_c": 84.237,
+      "latency_median_ms": 210.96288900025684
+    }
+  ],
+  "mediation": {
+    "jobs_with_clock": 619,
+    "step_mhz": 50.0,
+    "levels": [
+      {
+        "clock_mhz": 1800.457088,
+        "n": 334,
+        "latency_median_ms": 196.57335300018985,
+        "predicted_ms": 196.57335300018985
+      },
+      {
+        "clock_mhz": 1726.41792,
+        "n": 107,
+        "latency_median_ms": 207.68624900006216,
+        "predicted_ms": 205.00359885115063
+      },
+      {
+        "clock_mhz": 1677.427712,
+        "n": 88,
+        "latency_median_ms": 210.18811450005614,
+        "predicted_ms": 210.99084281798125
+      },
+      {
+        "clock_mhz": 1629.386752,
+        "n": 63,
+        "latency_median_ms": 212.65392699979202,
+        "predicted_ms": 217.211712496554
+      },
+      {
+        "clock_mhz": 1580.396544,
+        "n": 26,
+        "latency_median_ms": 215.61719500004983,
+        "predicted_ms": 223.94498903758543
+      },
+      {
+        "clock_mhz": 1531.406208,
+        "n": 1,
+        "latency_median_ms": 219.9424729999464,
+        "predicted_ms": 231.10908449518175
+      }
+    ]
+  },
+  "pacing_latency": {
+    "paced": {
+      "n": 723,
+      "latency_median_ms": 196.35
+    },
+    "after_wait": {
+      "n": 711,
+      "latency_median_ms": 196.35
+    },
+    "back_to_back_below_knee": {
+      "n": 352,
+      "latency_median_ms": 196.5
+    }
+  },
+  "knee": {
+    "knee_c": 81.315,
+    "f_max": 1800.457088,
+    "f_min": 1531.406208,
+    "depth": 0.1494347639792235,
+    "throttled_samples": 288
+  },
+  "knee_c": 81.315,
+  "unstopped_workers": [],
+  "g2": {
+    "state": "PASS",
+    "slope": {
+      "slope_ms_per_C": 0.20799825012541626,
+      "ci_lo": 0.0696440893483198,
+      "ci_hi": 0.3432720632194611,
+      "n_bins": 36,
+      "n_boot_used": 2000
+    },
+    "reason": "service time rises with temperature (CI above 0)"
+  },
+  "exp2_outcome": "PASS"
+}

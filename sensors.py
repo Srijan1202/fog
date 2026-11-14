@@ -1,4 +1,8 @@
 """
+
+sensors.py
+Collects system measurements. Under A3, the Raspberry Pi backend can optionally collect arm_clock_mhz from vcgencmd measure_clock arm. This additional measurement is enabled for Experiment 1, not automatically for the previously validated workload and Experiment 3 configurations.
+
 sensors.py - platform-adaptive telemetry for the TDAS pilot.
 
 Backends are tried in order and the first that works is used. Each backend

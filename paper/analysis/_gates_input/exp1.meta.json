@@ -1,0 +1,157 @@
+{
+  "experiment": "exp1_thermal",
+  "backend": "raspberrypi",
+  "mock": false,
+  "idle_temp_c": 48.686,
+  "idle_baseline_source": "median of 30 s idle window",
+  "idle_window": {
+    "baseline_c": 48.686,
+    "min_c": 47.225,
+    "max_c": 49.66,
+    "n": 61,
+    "window_s": 30.0,
+    "stable": false
+  },
+  "cool_end_reason": "cool_minutes_elapsed",
+  "cool_wall_s": 600.169,
+  "cool_consecutive": 10,
+  "p4_status": "NO_KILL",
+  "heat_minutes": 15.0,
+  "jobs_executed": 5536,
+  "samples": 6894,
+  "t_peak_c": 83.75,
+  "fit_heating": {
+    "tau": 108.93044980248169,
+    "y_inf": 82.20376803362512,
+    "y0": 59.43564716249851,
+    "ss": 2261.2039541062936,
+    "r2": 0.9767364596589713,
+    "resid_first_half_mean": 0.01251877779325427,
+    "resid_second_half_mean": -0.012518777793119246,
+    "possible_second_order": false
+  },
+  "fit_cooling": {
+    "tau": 106.68947490861137,
+    "y_inf": 50.787480142214946,
+    "y0": 72.33400596939961,
+    "ss": 1823.110045944728,
+    "r2": 0.9772928757534913,
+    "resid_first_half_mean": 0.08696958362560564,
+    "resid_second_half_mean": -0.08696958362644733,
+    "possible_second_order": false
+  },
+  "knee": {
+    "knee_c": 80.828,
+    "f_max": 1800.457088,
+    "f_min": 1629.386752,
+    "depth": 0.09501494767088847,
+    "throttled_samples": 477,
+    "clock_source": "arm_clock_mhz",
+    "clock_samples": 6894,
+    "clock_missing": 0
+  },
+  "knee_sysfs": {
+    "knee_c": null,
+    "f_max": 1800.0,
+    "f_min": 1800.0,
+    "depth": 0.0,
+    "throttled_samples": 0
+  },
+  "workers": 4,
+  "max_temp_c": null,
+  "abort_reason": null,
+  "heat_wall_s": 900.814,
+  "parent_cpu_s": 31.939,
+  "worker_report": [
+    {
+      "pid": 3215,
+      "jobs": 1382,
+      "cpu_s": 874.286,
+      "wall_s": 900.695,
+      "worker": 0,
+      "exitcode": 0,
+      "forced_stop": false,
+      "unstopped": false
+    },
+    {
+      "pid": 3216,
+      "jobs": 1382,
+      "cpu_s": 874.143,
+      "wall_s": 900.588,
+      "worker": 1,
+      "exitcode": 0,
+      "forced_stop": false,
+      "unstopped": false
+    },
+    {
+      "pid": 3217,
+      "jobs": 1385,
+      "cpu_s": 875.333,
+      "wall_s": 900.29,
+      "worker": 2,
+      "exitcode": 0,
+      "forced_stop": false,
+      "unstopped": false
+    },
+    {
+      "pid": 3218,
+      "jobs": 1387,
+      "cpu_s": 876.259,
+      "wall_s": 900.441,
+      "worker": 3,
+      "exitcode": 0,
+      "forced_stop": false,
+      "unstopped": false
+    }
+  ],
+  "cpu_util_heating": {
+    "per_core_busy": [
+      1.0,
+      0.999,
+      0.999,
+      1.0
+    ],
+    "avg_cores_busy": 3.998
+  },
+  "blas_libs": [
+    "/usr/lib/aarch64-linux-gnu/blas/libblas.so.3.12.1",
+    "/usr/lib/aarch64-linux-gnu/lapack/liblapack.so.3.12.1"
+  ],
+  "heat_snapshot_start": {
+    "t_wall": 2550.698720809,
+    "temp_c": 51.608,
+    "freq_mhz": 1800.0,
+    "throttled": 0,
+    "energy_uj": null,
+    "arm_clock_mhz": 1800.457088
+  },
+  "heat_snapshot_end": {
+    "t_wall": 3451.51262686,
+    "temp_c": 81.315,
+    "freq_mhz": 1800.0,
+    "throttled": 524288,
+    "energy_uj": null,
+    "arm_clock_mhz": 1800.457088
+  },
+  "heat_summary": {
+    "samples": 3960,
+    "temp_min_c": 51.608,
+    "temp_max_c": 83.75,
+    "freq_min_mhz": 1800.0,
+    "freq_max_mhz": 1800.0,
+    "arm_clock_min_mhz": 1629.386752,
+    "arm_clock_max_mhz": 1800.457088,
+    "throttled_or": "0x80008",
+    "throttled_nonzero_samples": 2662
+  },
+  "interrupted": null,
+  "monitor": {
+    "validator_pid": 2798,
+    "validator_start": 251797,
+    "watchdog_pid": 2826,
+    "watchdog_start": 251878,
+    "stale_s": 30.0
+  },
+  "unstopped_workers": [],
+  "exp1_outcome": "VALID_KNEE"
+}
